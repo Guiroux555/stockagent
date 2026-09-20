@@ -33,6 +33,17 @@ class Benchmark:
     name: str
     final: float
     drawdown: float
+    coverage: float = 1.0
+    """Fraction of the window the benchmark actually had prices for.
+
+    SPY starts in 1993 and this history starts in 1990, so a window before that
+    has no index to compare against. Reporting a 0% benchmark there would hand
+    the agent a spurious thirty-point edge — which is exactly the kind of
+    quiet flattery the rest of this file exists to prevent."""
+
+    @property
+    def available(self) -> bool:
+        return self.coverage >= 0.9
 
 
 @dataclass
@@ -221,6 +232,12 @@ class Report:
         ]
 
         for b in self.benchmarks:
+            if not b.available:
+                lines.append(
+                    f"  {b.name:<17}          n/a"
+                    f"   (only {b.coverage:.0%} of this window — no comparison)"
+                )
+                continue
             edge = self.total_return - self.benchmark_return(b)
             per_dd = self.benchmark_cagr(b) / b.drawdown if b.drawdown else 0.0
             lines += [
@@ -451,7 +468,7 @@ def _passive(
     have done, and it is the same constraint the strategy works under.
     """
     if first_ts is None or not series:
-        return Benchmark(name, settings.initial_capital, 0.0)
+        return Benchmark(name, settings.initial_capital, 0.0, coverage=0.0)
 
     entries: dict[str, float] = {}
     exits: dict[str, float] = {}
@@ -462,7 +479,15 @@ def _passive(
             entries[sym] = opening.close
             exits[sym] = bars[end_i].close
     if not entries:
-        return Benchmark(name, settings.initial_capital, 0.0)
+        return Benchmark(name, settings.initial_capital, 0.0, coverage=0.0)
+
+    covered = 0
+    for ts in timeline:
+        if any(
+            any(b.open_time == ts for b in series[sym]) for sym in entries
+        ):
+            covered += 1
+    coverage = covered / len(timeline) if timeline else 0.0
 
     slice_size = settings.initial_capital / len(entries)
     cost = (1 - settings.fee_rate) * (1 - settings.slippage)
@@ -490,4 +515,4 @@ def _passive(
         if peak > 0:
             worst = max(worst, 1 - value / peak)
 
-    return Benchmark(name, final, worst)
+    return Benchmark(name, final, worst, coverage=coverage)

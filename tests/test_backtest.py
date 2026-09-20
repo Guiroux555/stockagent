@@ -151,3 +151,19 @@ def test_exposure_is_reported_next_to_the_drawdown(cfg, store):
     r = run_backtest(store, cfg)
     assert 0.0 <= r.avg_exposure <= 1.0
     assert "Avg exposure" in r.summary(cfg)
+
+
+def test_a_benchmark_that_does_not_cover_the_window_is_not_compared(cfg, store):
+    """SPY starts in 1993 and this history starts in 1990. Quoting a 0%
+    benchmark there would hand the agent a spurious thirty-point edge."""
+    trimmed = Store(":memory:")
+    for sym in cfg.universe:
+        trimmed.save_bars(sym, cfg.interval, store.load_bars(sym, cfg.interval))
+    # Enough history to be analysed, but starting well after the strategy did.
+    trimmed.save_bars("SPY", cfg.interval, store.load_bars("SPY", cfg.interval)[300:])
+
+    r = run_backtest(trimmed, cfg)
+    trimmed.close()
+    spy = next(b for b in r.benchmarks if "SPY" in b.name)
+    assert not spy.available and spy.coverage < 0.9
+    assert "n/a" in r.summary(cfg)

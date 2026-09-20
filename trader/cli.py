@@ -236,24 +236,27 @@ def _walk_forward(store: Store, settings: Settings, args) -> int:
         spy = next(
             (b for b in r.benchmarks if b.name.startswith("Buy & hold")), None
         )
-        edge = r.total_return - (r.benchmark_return(spy) if spy else 0.0)
+        comparable = spy is not None and spy.available
+        edge = r.total_return - r.benchmark_return(spy) if comparable else None
         results.append((r.total_return, edge))
         label = (
             f"{r.start:%Y-%m} -> {r.end:%Y-%m}" if r.start and r.end else "no data"
         )
         print(
             f"  {label:<26}{r.total_return:>+10.1%}{r.max_drawdown:>9.1%}"
-            f"{len(r.round_trips):>11}{edge:>+10.1%}"
+            f"{len(r.round_trips):>11}"
+            + (f"{edge:>+10.1%}" if edge is not None else f"{'n/a':>10}")
         )
 
     rets = sorted(r for r, _ in results)
     median = rets[len(rets) // 2]
     positive = sum(1 for r, _ in results if r > 0)
-    beat = sum(1 for _, e in results if e > 0)
+    judged = [e for _, e in results if e is not None]
+    beat = sum(1 for e in judged if e > 0)
     print("-" * 74)
     print(
         f"  median {median:+.1%}   positive {positive}/{len(results)}"
-        f"   beat SPY {beat}/{len(results)}   worst {min(rets):+.1%}"
+        f"   beat SPY {beat}/{len(judged)}   worst {min(rets):+.1%}"
     )
     return 0
 

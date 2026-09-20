@@ -131,6 +131,15 @@ class Settings:
     express a small position at all. Turning this off makes the sizing
     continuous again, and the README measures what that is worth."""
 
+    execute_at_close: bool = False
+    """Fill orders at the close the decision was read from, instead of at the
+    next open. **This is the dishonest mode, and it exists to be measured.**
+
+    It is what most equity backtests do, usually without saying so, and it is
+    not reachable in reality: the closing print is published once the book is
+    shut. Turning it on and comparing is the only way to put a number on what
+    that shortcut is worth, and the number is in the README. Leave it off."""
+
     max_gap_atr: float = 1.0
     """Cancel a queued entry if the opening print has gapped more than this
     many ATR beyond the close the decision was made on.

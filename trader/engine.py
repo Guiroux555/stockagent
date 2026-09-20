@@ -132,6 +132,12 @@ class Engine:
             views, ts, equity, day_start_equity, peak_equity, queue, result
         )
 
+        if self.settings.execute_at_close:
+            # The mode that exists to be measured rather than used: fill at the
+            # price the decision was read from. See `Settings.execute_at_close`.
+            self._fill_at_close(views, ts, queue, result)
+            queue = []
+
         self.pending = queue
         result.orders = queue
         result.equity = pf.equity(
@@ -223,6 +229,7 @@ class Engine:
         ts: int,
         open_prices: dict[str, float],
         result: StepResult,
+        same_bar: bool = True,
     ) -> None:
         s = self.settings
         pf = self.portfolio
@@ -284,9 +291,34 @@ class Engine:
         # it was entered, and letting it ride to the close instead would be a
         # free overnight that the trader never got.
         pos = pf.positions[order.symbol]
-        if view.bar.low <= pos.stop:
+        if same_bar and view.bar.low <= pos.stop:
             trade = pf.sell(order.symbol, pos.stop, ts, "stop hit, same session")
             self._record_trade(trade, result, f"stop at {pos.stop:.2f}, same session")
+
+    def _fill_at_close(
+        self,
+        views: dict[str, SymbolView],
+        ts: int,
+        queue: list[Order],
+        result: StepResult,
+    ) -> None:
+        """Execute the queue immediately, at this session's close.
+
+        Deliberately kept to a handful of lines and deliberately not the
+        default. The same-session stop check is skipped here because there is
+        no session left to hit it in — which is exactly one of the ways this
+        mode flatters itself.
+        """
+        closes = {sym: v.analysis.closes[v.index] for sym, v in views.items()}
+        for order in sorted(queue, key=lambda o: 0 if o.side == "SELL" else 1):
+            view = views.get(order.symbol)
+            if view is None:
+                continue
+            price = view.analysis.closes[view.index]
+            if order.side == "SELL":
+                self._fill_sell(order, price, ts, result)
+            else:
+                self._fill_buy(order, view, price, ts, closes, result, same_bar=False)
 
     # --- 4. reading the close -------------------------------------------
 

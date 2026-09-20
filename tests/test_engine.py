@@ -309,3 +309,36 @@ def test_positions_never_exceed_the_limit(settings):
     _, pf, steps = run(cfg, series)
     assert any(steps)
     assert len(pf.positions) <= 3
+
+
+# --- the mode that exists to be measured ------------------------------------
+
+
+def test_close_fill_mode_fills_at_the_close_and_is_off_by_default(settings, one_name):
+    """Kept reachable so the README's claim about what it is worth can be
+    reproduced; kept off because the closing print is published after the book
+    is shut."""
+    assert settings.execute_at_close is False
+
+    cheating = replace(
+        settings, universe=("AAA",), market_anchor="", min_notional=0.0,
+        execute_at_close=True,
+    )
+    _, _, steps = run(cheating, one_name)
+    analysis = analyze(one_name["AAA"], cheating)
+    fills = [
+        (i, d) for i, r in steps for d in r.decisions if d.action == "BUY"
+    ]
+    assert fills, "nothing was bought, so this test proved nothing"
+    for i, d in fills:
+        assert d.price == pytest.approx(analysis.closes[i] * (1 + cheating.slippage))
+
+
+def test_close_fill_mode_leaves_nothing_queued(settings, one_name):
+    cheating = replace(
+        settings, universe=("AAA",), market_anchor="", min_notional=0.0,
+        execute_at_close=True,
+    )
+    engine, _, steps = run(cheating, one_name)
+    assert engine.pending == []
+    assert all(r.orders == [] for _, r in steps)
