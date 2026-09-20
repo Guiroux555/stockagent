@@ -286,6 +286,73 @@ class Settings:
     sectors at 0.324. If cross-sectional momentum works anywhere in this
     universe, it should work here."""
 
+    # --- earnings blackout --------------------------------------------------
+    earnings_mode: str = "off"
+    """`off`, `block` or `reduce`.
+
+    Off by default until the measurement justifies it, like every other gate in
+    this file. What it guards against is real and specific: `risk.py` promises
+    that a position loses `risk_per_trade` if the stop is hit, and an earnings
+    gap breaks that promise by jumping the stop instead of crossing it. See
+    `events.py` and the README."""
+
+    earnings_blackout_before: int = 2
+    """Sessions before a *confirmed* release during which no new position is
+    opened. Two, because the agent decides on a close and fills at the next
+    open: one session of margin, plus the session of the release itself."""
+    earnings_blackout_after: int = 1
+    """Sessions after a release during which no new position is opened."""
+    earnings_estimated_extra: int = 2
+    """Extra sessions on both sides when the date is a projection rather than a
+    filing. A wrong date is worse than no date — it blocks the safe day and
+    leaves the dangerous one open — so an estimate buys a wider window rather
+    than the same confidence."""
+    earnings_size_factor: float = 0.5
+    """Position multiplier in `reduce` mode. Halving the size halves the gap
+    loss, which is the quantity the promise in `risk.py` is about."""
+
+    sec_user_agent: str = (
+        "stock-paper-trader/0.1 (paper trading research; example@example.com)"
+    )
+    """EDGAR refuses traffic whose User-Agent carries no contact address, and
+    it wants one shaped like an email — the string above without the address
+    returns 403.
+
+    It is a courtesy header, not a credential: it identifies no account, opens
+    no session and unlocks nothing that is not already public. The default is a
+    placeholder on purpose, because nobody's real address belongs in a
+    repository. **Put yours here before running a long sync**; the SEC asks for
+    a way to reach whoever is generating the traffic, and a placeholder is an
+    answer that does not answer."""
+    cik_history: tuple[tuple[str, str], ...] = (
+        ("XOM", "34088"),
+        ("BLK", "1364742"),
+        ("GOOGL", "1288776"),
+        ("DIS", "1001039"),
+    )
+    """Predecessor filers to merge in, by ticker.
+
+    The SEC ticker map points at whoever files *today*. A company that
+    reorganised — Exxon in 2025, BlackRock in 2024, Google into Alphabet in
+    2015, Disney through the Fox deal in 2019 — keeps its earlier filings under
+    the old registrant, so following the map alone returns one release for
+    Exxon and eight for BlackRock while the price series runs back to 1990.
+
+    That is exactly the failure this whole feature is supposed to avoid: a
+    calendar with holes blocks the sessions it knows about, leaves the rest
+    open, and looks like protection either way. These four were found by the
+    coverage check below, not guessed, and the check keeps running so the next
+    one is found too."""
+
+    min_calendar_coverage: float = 0.6
+    """Fraction of the expected quarterly releases a name must have before its
+    calendar is treated as usable. Below it, the name is reported as uncovered
+    rather than quietly half-protected."""
+
+    sec_pause: float = 0.15
+    """Seconds between EDGAR requests. Their published ceiling is ten a second;
+    this sits well under it."""
+
     # --- news -------------------------------------------------------------
     news_enabled: bool = False
     """Fetch headlines on every tick and add them to the archive.
@@ -336,6 +403,14 @@ class Settings:
         "https://query1.finance.yahoo.com",
         "https://query2.finance.yahoo.com",
     )
+
+    def blackout_window(self, status: str) -> tuple[int, int]:
+        """Sessions blocked before and after a release of this kind."""
+        extra = 0 if status == "confirmed" else self.earnings_estimated_extra
+        return (
+            self.earnings_blackout_before + extra,
+            self.earnings_blackout_after + extra,
+        )
 
     @property
     def sector_of(self) -> dict[str, str]:

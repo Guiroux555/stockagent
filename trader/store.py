@@ -55,6 +55,18 @@ CREATE TABLE IF NOT EXISTS pending_orders (
     created_ts   INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS earnings (
+    symbol      TEXT NOT NULL,
+    event_date  TEXT NOT NULL,
+    filed_date  TEXT NOT NULL DEFAULT '',
+    accepted_ts INTEGER NOT NULL DEFAULT 0,
+    status      TEXT NOT NULL DEFAULT 'confirmed',
+    source      TEXT NOT NULL DEFAULT '',
+    fetched_at  INTEGER NOT NULL,
+    PRIMARY KEY (symbol, event_date)
+);
+CREATE INDEX IF NOT EXISTS idx_earnings_symbol ON earnings(symbol, event_date);
+
 CREATE TABLE IF NOT EXISTS news (
     uid        TEXT NOT NULL,
     symbol     TEXT NOT NULL,
@@ -320,6 +332,74 @@ class Store:
             for r in rows
         ]
 
+    # --- earnings calendar -------------------------------------------------
+
+    def save_earnings(self, rows: Iterable) -> int:
+        """Cache earnings dates, keeping the `fetched_at` of the first sight.
+
+        `INSERT OR IGNORE`, for the same reason as the news archive: a filing
+        date is not restated, so a row that changes is a row that was wrong,
+        and overwriting it would erase the evidence rather than the error.
+        """
+        payload = [
+            (
+                r.symbol,
+                r.event_date,
+                r.filed_date,
+                r.accepted_ts,
+                r.status,
+                r.source,
+                r.fetched_at or int(time.time() * 1000),
+            )
+            for r in rows
+        ]
+        if not payload:
+            return 0
+        before = self.conn.total_changes
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO earnings"
+            " (symbol,event_date,filed_date,accepted_ts,status,source,fetched_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            payload,
+        )
+        self.conn.commit()
+        return self.conn.total_changes - before
+
+    def load_earnings(self, symbol: str | None = None) -> list:
+        from .events import EarningsDate
+
+        sql = "SELECT * FROM earnings"
+        args: list = []
+        if symbol:
+            sql += " WHERE symbol=?"
+            args.append(symbol)
+        sql += " ORDER BY symbol, event_date"
+        return [
+            EarningsDate(
+                symbol=r["symbol"],
+                event_date=r["event_date"],
+                filed_date=r["filed_date"],
+                accepted_ts=r["accepted_ts"],
+                status=r["status"],
+                source=r["source"],
+                fetched_at=r["fetched_at"],
+            )
+            for r in self.conn.execute(sql, args).fetchall()
+        ]
+
+    def earnings_coverage(self) -> dict[str, tuple[int, str, str]]:
+        """Per symbol: how many releases are cached, and the span they cover.
+
+        Printed rather than assumed, because a calendar with holes blocks the
+        wrong sessions and leaves the right ones open, which is worse than
+        having no calendar at all.
+        """
+        rows = self.conn.execute(
+            "SELECT symbol, COUNT(*) AS n, MIN(event_date) AS lo,"
+            " MAX(event_date) AS hi FROM earnings GROUP BY symbol"
+        ).fetchall()
+        return {r["symbol"]: (int(r["n"]), r["lo"] or "", r["hi"] or "") for r in rows}
+
     # --- news archive -----------------------------------------------------
 
     def save_news(self, items: Iterable) -> int:
@@ -505,9 +585,9 @@ class Store:
 
     def reset_trading_state(self) -> None:
         """Wipe the account, positions and history but keep the cached bars."""
-        # The news archive is deliberately not in this list: it is a record of
-        # what was public when, it is not part of the account, and it cannot be
-        # rebuilt once discarded.
+        # The news archive and the earnings calendar are deliberately not in
+        # this list: they record what was public when, they are not part of the
+        # account, and the archive cannot be rebuilt once discarded.
         for table in (
             "positions",
             "pending_orders",

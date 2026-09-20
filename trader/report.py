@@ -282,3 +282,75 @@ def news_board(store: Store, settings: Settings, limit: int = 30) -> str:
             out.append(f"  {'':<17}  {'':<7}{'':>6}  {'':<9} -> {item.matched}")
     out.append("=" * 92)
     return "\n".join(out)
+
+
+def event_board(store: Store, settings: Settings) -> str:
+    """Coverage of the earnings calendar, and what is coming.
+
+    Coverage is printed first and in full, because a calendar with holes is
+    worse than no calendar: it blocks the sessions it knows about and leaves
+    the ones it does not wide open, while looking like protection.
+    """
+    from .events import COVERAGE_FLOOR, project_next
+    from .models import session_date
+
+    coverage = store.earnings_coverage()
+    missing = [s for s in settings.universe if s not in coverage]
+    counts = [n for n, _, _ in coverage.values()]
+    total = sum(counts)
+
+    mode = settings.earnings_mode
+    before, after = settings.blackout_window("confirmed")
+    est_before, est_after = settings.blackout_window("estimated")
+
+    out = [
+        "=" * 84,
+        "  EARNINGS CALENDAR   (SEC EDGAR, form 8-K item 2.02)",
+        "=" * 84,
+        f"  {total:,} release(s) across {len(coverage)}/{len(settings.universe)}"
+        f" names   first usable session {COVERAGE_FLOOR}",
+    ]
+    if missing:
+        out.append(f"  no calendar for: {', '.join(sorted(missing))}")
+    if counts:
+        out.append(
+            f"  per name: fewest {min(counts)}, median"
+            f" {sorted(counts)[len(counts) // 2]}, most {max(counts)}"
+        )
+    out += [
+        "",
+        f"  Mode      {mode}"
+        + (
+            "   — the calendar is cached and reported but gates nothing"
+            if mode == "off"
+            else f"   confirmed: -{before}/+{after} sessions,"
+            f" estimated: -{est_before}/+{est_after}"
+        ),
+        "",
+        "  NEXT UP   (projected from each company's own filing history)",
+        f"  {'name':<8}{'projected':<14}{'last confirmed':<16}{'releases':>9}",
+        "  " + "-" * 50,
+    ]
+
+    today = session_date(int(datetime.now(timezone.utc).timestamp() * 1000))
+    upcoming = []
+    for symbol in settings.universe:
+        history = store.load_earnings(symbol)
+        nxt = project_next(history, today)
+        if nxt is not None:
+            last = history[-1].event_date if history else "-"
+            upcoming.append((nxt.event_date, symbol, last, len(history)))
+    for day, symbol, last, n in sorted(upcoming)[:15]:
+        out.append(f"  {symbol:<8}{day:<14}{last:<16}{n:>9}")
+    if not upcoming:
+        out.append("  nothing projected — run `python -m trader events --sync`")
+    out.append("")
+    out.append(
+        "  A projection is an estimate, and a wrong date is worse than no date:"
+    )
+    out.append(
+        "  it blocks the safe session and leaves the dangerous one open."
+        "  Hence the wider window."
+    )
+    out.append("=" * 84)
+    return "\n".join(out)

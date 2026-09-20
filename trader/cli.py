@@ -7,6 +7,7 @@ python -m trader backtest          replay the cache through the same engine
 python -m trader status            account, positions, resting orders
 python -m trader trends            short and medium-term trends, by sector and name
 python -m trader news              the headline archive, and what it is worth
+python -m trader events            the earnings calendar, its coverage and its gaps
 python -m trader watch             what the strategy sees right now
 python -m trader log               recent decisions, including the HOLDs
 python -m trader reset             wipe the account, keep the price history
@@ -21,7 +22,14 @@ from datetime import datetime, timedelta, timezone
 from .agent import run_forever, run_tick, sync
 from .backtest import run_backtest
 from .config import DEFAULT_DB, Settings
-from .report import decision_log, news_board, status, trend_board, watchlist
+from .report import (
+    decision_log,
+    event_board,
+    news_board,
+    status,
+    trend_board,
+    watchlist,
+)
 from .store import Store
 
 BANNER = (
@@ -84,6 +92,16 @@ def _parser() -> argparse.ArgumentParser:
     n = sub.add_parser("news", help="the headline archive")
     n.add_argument("--sync", action="store_true", help="fetch headlines first")
     n.add_argument("-n", type=int, default=30)
+
+    e = sub.add_parser("events", help="the earnings calendar")
+    e.add_argument(
+        "--sync", action="store_true", help="fetch earnings dates from SEC EDGAR"
+    )
+    e.add_argument(
+        "--gaps",
+        action="store_true",
+        help="compare opening gaps on earnings sessions with every other session",
+    )
 
     lg = sub.add_parser("log", help="recent decisions")
     lg.add_argument("-n", type=int, default=25)
@@ -155,6 +173,19 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "trends":
             print(trend_board(store, settings))
+            return 0
+
+        if args.command == "events":
+            from .events import gap_study
+            from .events import sync as sync_events
+
+            if args.sync:
+                counts = sync_events(store, settings)
+                print(f"  {sum(counts.values())} earnings date(s) cached")
+            if args.gaps:
+                print(gap_study(store, settings).summary(settings))
+            else:
+                print(event_board(store, settings))
             return 0
 
         if args.command == "news":
