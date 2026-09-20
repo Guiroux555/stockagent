@@ -111,12 +111,74 @@ python -m trader fund 100000   # dote le compte virtuel — le chrono démarre i
 python -m trader track         # ce qu'il a fait depuis, et ce que ça vaut
 ```
 
-Le budget est en dizaines de milliers plutôt qu'en milliers pour une raison
-mécanique : les actions s'achètent par titres entiers. Avec 1 000 USD et
-`max_concurrent` positions, la moitié des candidats sont refusés par
-`min_notional` et l'agent mesuré n'est plus celui qui a été backtesté. La
-comparaison entre les deux agents se fait en pourcentage, pas en valeur
-absolue — et `deploy/portfolio.py` s'en charge.
+### 1 000 € sur l'agent actions : ce que ça change
+
+Avec les réglages par défaut, **un compte de 1 000 n'ouvre aucune position, et
+ne le dit nulle part**. Une position est plafonnée à `max_position_pct` = 4 %
+des fonds, soit 40, et le minimum de courtier `min_notional` est à 500 : chaque
+candidat est refusé pour cause de taille avant même qu'un signal soit lu.
+L'agent lit tout correctement, décline tout, et a l'air en parfaite santé.
+`fund` calcule ce plancher sur les prix en cache et le dit maintenant :
+
+```
+  !! at 1,000.00 USD this agent cannot open a single position.
+     One position is capped at 4% of equity, so 40.00 USD, and the broker
+     minimum is 500.00 USD. Every candidate is refused before a signal is read.
+
+     Two ways out, and they are not the same decision:
+       fund 12,507    one position becomes possible; the settings stay as measured
+       fund 28,823    all 88 names become reachable, which is the universe
+                     the backtest actually ran on
+```
+
+Ces deux nombres sont mesurés sur les prix du jour, pas déduits : il faut
+12 507 pour que *un* nom devienne accessible et 28 823 pour les 87, parce
+qu'une action est indivisible et qu'une part de LLY coûte 1 153.
+
+**La sortie qui garde les 1 000, c'est `config/small-account.json`** : parts
+fractionnées, minimum ramené à 5. Et là le résultat ne dépend plus de la
+stratégie mais du barème de votre courtier. Mesuré sur 2011-09 → 2026-09,
+87 valeurs, univers complet :
+
+| compte | frais fixes | CAGR | frais payés |
+|---|---|---|---|
+| 100 000, réglages par défaut | — | **+7,72 %** | 4 172 |
+| 1 000, parts fractionnées | 0 €/ordre | **+8,02 %** | 42 |
+| 1 000, parts fractionnées | 0,25 €/ordre | +3,78 % | 861 |
+| 1 000, parts fractionnées | 0,50 €/ordre | **−2,54 %** | 1 175 |
+| 1 000, parts fractionnées | 1 €/ordre | **−2,62 %** | 643 |
+
+Deux lectures, et la seconde est la seule qui compte :
+
+* **La petite taille ne coûte rien en soi.** À frais nuls, 1 000 fait +8,02 %
+  par an contre +7,72 % pour 100 000 — la même stratégie, au bruit près. Dès
+  que les parts sont divisibles, la taille du compte est sans effet.
+* **Le frais fixe décide de tout.** À 1 € l'ordre, 25 positions de 40 € paient
+  2,5 % à l'aller et autant au retour ; sur quinze ans ça fait 643 € de frais
+  sur un compte de 1 000, et une stratégie à +8 % par an devient une stratégie
+  à −2,6 %. Le point mort est **entre 0,25 et 0,50 € par ordre**.
+
+Concentrer n'y change rien : à 1 €/ordre, 5 positions de 150 € au lieu de 25 de
+40 € donnent −2,29 % au lieu de −2,62 %, et les mêmes 5 positions sans frais
+fixe ne font que +2,11 % — la concentration coûte plus en dépendance à une
+seule position qu'elle ne fait économiser en frais.
+
+**Donc** : 1 000 € sur l'agent actions n'a de sens que chez un courtier sans
+frais par ordre. Sinon, le budget qui correspond aux réglages mesurés est de
+l'ordre de 30 000 — ou l'agent crypto, où la question ne se pose pas.
+
+### Une note sur la devise
+
+Les deux agents comptent en USD et en USDT, parce que c'est la devise des prix
+qu'ils lisent : actions américaines et paires USDT. « 1 000 € » est donc lu ici
+comme **1 000 unités de la devise de cotation**, pas converti. C'est délibéré :
+convertir mettrait les mouvements EUR/USD dans le P&L, et la mesure que
+`track` construit deviendrait un mélange de la stratégie et du change — deux
+choses que l'agent ne modélise pas de la même façon, dont une qu'il ne
+modélise pas du tout.
+
+La comparaison entre les deux agents se fait donc en pourcentage, pas en valeur
+absolue, et `deploy/portfolio.py` s'en charge.
 
 ### Les six conditions
 
@@ -1215,6 +1277,10 @@ trader/
   backtest.py    rejeu + métriques + mesures de concentration + deux benchmarks
   report.py      status, watchlist, journal
   cli.py         interface en ligne de commande
+
+config/
+  small-account.json  parts fractionnées et frais fixe par ordre : ce qu'un
+                      compte de 1 000 est réellement
 
 deploy/
   install.sh     installe le tout sur un Raspberry Pi, en une commande

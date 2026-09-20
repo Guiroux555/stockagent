@@ -164,8 +164,8 @@ sudo python3 /opt/stockagent/deploy/portfolio.py \
 ```
 
 Le service dote le compte tout seul au premier tick, avec le capital de la
-configuration, et écrit la date de départ dans la base. Pour choisir un autre
-budget, faites-le **avant** de démarrer le service :
+configuration — 100 000 USD, le budget sur lequel le backtest est mesuré. Pour
+en choisir un autre, faites-le **avant** de démarrer le service :
 
 ```bash
 sudo systemctl stop stockagent
@@ -173,6 +173,32 @@ sudo -u stockagent /opt/stockagent/.venv/bin/python -m trader \
      --db /var/lib/stockagent/live.db fund 100000
 sudo systemctl start stockagent
 ```
+
+### Un budget de 1 000 sur cet agent-ci
+
+Il ne suffit pas de le doter : avec les réglages par défaut, un compte de 1 000
+**n'ouvre aucune position** — une position est plafonnée à 4 % des fonds, soit
+40, et le minimum de courtier est à 500. `fund` le dit et donne les deux
+sorties. Celle qui garde les 1 000 demande aussi de changer le modèle de
+courtier, via un drop-in systemd :
+
+```bash
+sudo systemctl stop stockagent
+sudo systemctl edit stockagent      # ajouter :
+#   [Service]
+#   Environment=TRADER_CONFIG=/opt/stockagent/config/small-account.json
+sudo -u stockagent /opt/stockagent/.venv/bin/python -m trader \
+     --config /opt/stockagent/config/small-account.json \
+     --db /var/lib/stockagent/live.db fund 1000
+sudo systemctl daemon-reload && sudo systemctl start stockagent
+```
+
+`small-account.json` active les parts fractionnées et ramène le minimum à 5. Il
+fixe aussi `fee_per_order` à 1 € — **et c'est ce chiffre-là, pas la stratégie,
+qui décide du résultat à cette taille.** Mesuré sur quinze ans : à 0 €/ordre le
+compte de 1 000 fait +8,02 % par an, à 0,25 € il fait +3,78 %, à 0,50 € il
+passe à −2,54 %. Mettez le barème réel de votre courtier, et lisez le README
+principal avant de vous décider.
 
 Après, `fund` refuse : redoter un compte qui a déjà tradé déplacerait la ligne
 de départ de la mesure, et c'est la seule chose qu'un test vers l'avant ne

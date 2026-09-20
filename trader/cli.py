@@ -30,6 +30,7 @@ from .agent import run_forever, run_tick, sync
 from .backtest import run_backtest
 from .config import DEFAULT_DB, Settings
 from .report import (
+    budget_check,
     decision_log,
     event_board,
     news_board,
@@ -365,6 +366,16 @@ def _fund(store: Store, settings: Settings, args) -> int:
     print(BANNER)
     print(f"  funded with {args.amount:,.2f} {settings.quote}, {now:%Y-%m-%d %H:%M UTC}")
     print("  the clock on the measurement starts now — `python -m trader track`")
+
+    # A share is indivisible and some of them cost a thousand dollars, so a
+    # budget can be too small to express a single position — and the agent
+    # would then read every signal correctly, decline every one of them, and
+    # look perfectly healthy doing it. Said here, at the only moment it can
+    # still be acted on cheaply.
+    warning = budget_check(store, settings, args.amount).report()
+    if warning:
+        print()
+        print(warning)
     return 0
 
 

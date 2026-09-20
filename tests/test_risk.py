@@ -202,3 +202,119 @@ def test_notional_sizing_still_refuses_a_stop_above_the_entry(settings):
     does not make a nonsensical one acceptable."""
     cfg = replace(settings, sizing_mode="notional")
     assert not size(Portfolio(cfg), 100.0, 105.0, cfg).ok
+
+
+# --- whether a budget can express a position at all -------------------------
+#
+# A share is indivisible and some of them cost a thousand dollars, so an
+# account can be too small to open anything — while reading every signal
+# correctly and looking perfectly healthy. Crypto never faces this.
+
+
+def test_the_minimum_capital_is_where_the_two_caps_cross(settings):
+    """A position is capped at `max_position_pct` of equity and refused below
+    `min_notional`. Below their crossing point nothing is expressible."""
+    assert settings.min_capital == settings.min_notional / settings.max_position_pct
+
+
+def test_a_thousand_euro_account_cannot_open_anything_on_the_defaults(settings):
+    from trader.report import can_enter
+
+    cap = 1000 * settings.max_position_pct
+    assert not can_enter(50.0, cap, settings)
+    assert not can_enter(500.0, cap, settings)
+
+
+def test_fractional_shares_make_the_share_price_irrelevant(settings):
+    """Which is exactly what a small account needs: the question stops being
+    'does a whole number of shares fit' and becomes 'is the window open'."""
+    from dataclasses import replace
+
+    from trader.report import can_enter
+
+    small = replace(settings, whole_shares=False, min_notional=5.0)
+    cap = 1000 * small.max_position_pct
+    assert can_enter(1_200.0, cap, small)
+    assert can_enter(22.0, cap, small)
+
+
+def test_whole_shares_need_a_multiple_inside_the_window(settings):
+    """Not just one affordable share: a whole number of them has to land above
+    the broker minimum and below the cap at the same time."""
+    from dataclasses import replace
+
+    from trader.report import can_enter
+
+    cfg = replace(settings, min_notional=500.0, whole_shares=True)
+    assert can_enter(600.0, 800.0, cfg), "one share at 600 sits in [500, 800]"
+    assert not can_enter(900.0, 800.0, cfg), "one share is already over the cap"
+    assert not can_enter(400.0, 450.0, cfg), "one is under the minimum, two over the cap"
+    assert can_enter(300.0, 700.0, cfg), "two shares at 300 sit in [500, 700]"
+
+
+def test_the_budget_check_names_what_cannot_be_reached(settings, tmp_path):
+    from dataclasses import replace
+
+    from conftest import bars_from_closes
+
+    from trader.report import budget_check
+    from trader.store import Store
+
+    cfg = replace(settings, universe=("CHEAP", "DEAR"), benchmark="", market_anchor="")
+    with Store(tmp_path / "b.db") as store:
+        store.save_bars("CHEAP", cfg.interval, bars_from_closes([20.0] * 5))
+        store.save_bars("DEAR", cfg.interval, bars_from_closes([4_000.0] * 5))
+
+        check = budget_check(store, cfg, 100_000)
+        assert check.reachable == ["CHEAP", "DEAR"] and not check.unreachable
+        assert check.report() == "", "nothing to warn about"
+
+        check = budget_check(store, cfg, 20_000)
+        assert check.reachable == ["CHEAP"]
+        assert [s for s, _ in check.unreachable] == ["DEAR"]
+        assert "cannot be entered" in check.report()
+
+        check = budget_check(store, cfg, 1_000)
+        assert not check.viable
+        assert "cannot open a single position" in check.report()
+
+
+# --- the flat per-order fee -------------------------------------------------
+
+
+def test_the_flat_fee_is_off_by_default(settings):
+    """Every figure in the README was measured without it, and they have to
+    stay reproducible."""
+    assert settings.fee_per_order == 0.0
+
+
+def test_a_flat_fee_is_charged_on_each_side(settings):
+    from dataclasses import replace
+
+    from trader.portfolio import Portfolio
+
+    cfg = replace(settings, fee_per_order=1.0, fee_rate=0.0, slippage=0.0)
+    book = Portfolio(cfg, cash=1000.0)
+    book.buy("AAA", 10.0, 10.0, 0, stop=9.0, atr=1.0)
+    assert book.cash == pytest.approx(1000.0 - 100.0 - 1.0)
+
+    trade = book.sell("AAA", 10.0, 1, "test")
+    assert book.cash == pytest.approx(899.0 + 100.0 - 1.0)
+    assert trade.fees == pytest.approx(2.0), "one euro in, one euro out"
+
+
+def test_a_scale_out_and_its_close_book_one_entry_fee(settings):
+    """The invariant `reduce` already kept for the proportional fee: a partial
+    exit plus the later close must cost exactly what one full exit would."""
+    from dataclasses import replace
+
+    from trader.portfolio import Portfolio
+
+    cfg = replace(settings, fee_per_order=1.0, fee_rate=0.0, slippage=0.0)
+    book = Portfolio(cfg, cash=1000.0)
+    book.buy("AAA", 10.0, 10.0, 0, stop=9.0, atr=1.0)
+    first = book.reduce("AAA", 0.5, 10.0, 1, "scale out")
+    second = book.sell("AAA", 10.0, 2, "close")
+
+    entry_fees = first.fees + second.fees - 2.0  # two exits, one euro each
+    assert entry_fees == pytest.approx(1.0), "the entry is charged once in total"

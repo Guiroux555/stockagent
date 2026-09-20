@@ -1,0 +1,6 @@
+{
+  "initial_capital": 1000.0,
+  "whole_shares": false,
+  "min_notional": 5.0,
+  "fee_per_order": 1.0
+}

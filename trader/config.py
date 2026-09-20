@@ -193,7 +193,28 @@ class Settings:
     """Half-spread plus impact, per side, applied against the agent. Orders
     fill in the opening auction, which is the most liquid print of the day and
     also the most volatile, so this is not generous."""
+    fee_per_order: float = 0.0
+    """A flat charge per order, on top of `fee_rate`. Zero by default.
+
+    Zero is right for the US retail broker `fee_rate` describes, and wrong for
+    almost every European one, which charges a euro or so per order however
+    small it is. The distinction does not matter on a 4,000 USD position — one
+    euro is 2.5bp — and it decides the outcome on a 40 EUR one, where the same
+    euro is 250bp per side and swamps any edge the strategy could have.
+
+    So it exists because of small accounts, and it defaults to zero so that
+    every figure in the README, all of which were measured without it, stays
+    exactly reproducible. `config/small-account.json` turns it on."""
     min_notional: float = 500.0
+    """Smallest order the broker will accept, and — with `max_position_pct` —
+    the setting that decides whether a given budget can trade at all.
+
+    A position may not exceed `max_position_pct` of equity, so an account of
+    less than `min_notional / max_position_pct` cannot open a single position:
+    every candidate is refused for being too small before any signal is read.
+    At the defaults that floor is 12,500 USD. `Settings.min_capital` computes
+    it, and `trader fund` prints it rather than letting an account sit there
+    doing nothing for a fortnight."""
     whole_shares: bool = True
     """Round orders down to whole shares.
 
@@ -536,6 +557,18 @@ class Settings:
             s for s in (self.benchmark, self.market_anchor) if s and s not in self.universe
         )
         return self.universe + tuple(dict.fromkeys(extra))
+
+    @property
+    def min_capital(self) -> float:
+        """Smallest account that can open any position at all.
+
+        A position is capped at `max_position_pct` of equity and refused below
+        `min_notional`, and those two cross at exactly this number. Below it
+        the agent reads every signal correctly and declines every one of them.
+        """
+        if self.max_position_pct <= 0:
+            return float("inf")
+        return self.min_notional / self.max_position_pct
 
     @property
     def live_window(self) -> int:

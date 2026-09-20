@@ -75,7 +75,10 @@ class Portfolio:
         fill = self.buy_fill_price(price)
         if fill <= 0:
             return 0.0
-        return self.cash / (fill * (1 + self.settings.fee_rate))
+        spendable = self.cash - self.settings.fee_per_order
+        if spendable <= 0:
+            return 0.0
+        return spendable / (fill * (1 + self.settings.fee_rate))
 
     def buy(
         self,
@@ -93,7 +96,7 @@ class Portfolio:
 
         fill_price = self.buy_fill_price(price)
         cost = qty * fill_price
-        fee = cost * self.settings.fee_rate
+        fee = cost * self.settings.fee_rate + self.settings.fee_per_order
         if cost + fee > self.cash + 1e-9:
             raise InsufficientFunds(
                 f"need {cost + fee:.2f} {self.settings.quote}, have {self.cash:.2f}"
@@ -143,8 +146,15 @@ class Portfolio:
 
         fill_price = self.sell_fill_price(price)
         proceeds = qty * fill_price
-        exit_fee = proceeds * self.settings.fee_rate
-        entry_fee = qty * pos.entry_price * self.settings.fee_rate
+        # A partial exit is a whole order, so it pays the flat exit charge in
+        # full. The entry was *one* order, so its flat charge is booked once,
+        # on the close — not apportioned by `fraction`, which is a fraction of
+        # what is left rather than of what was bought, and would charge half a
+        # euro on a scale-out and a whole one on the remainder.
+        exit_fee = proceeds * self.settings.fee_rate + self.settings.fee_per_order
+        entry_fee = qty * pos.entry_price * self.settings.fee_rate + (
+            0.0 if fraction < 1.0 else self.settings.fee_per_order
+        )
 
         self.cash += proceeds - exit_fee
         pnl = (proceeds - exit_fee) - (qty * pos.entry_price + entry_fee)

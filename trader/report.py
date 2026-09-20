@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .config import Settings
@@ -18,6 +19,148 @@ def _prices(store: Store, settings: Settings) -> dict[str, float]:
             out[symbol] = bars[-1].close
     return out
 
+
+
+@dataclass
+class BudgetCheck:
+    """Whether a given virtual budget can actually open a position.
+
+    It is possible to fund this agent with a number that makes it read every
+    signal correctly and decline every single one, for a fortnight, silently.
+    That is not a bug and it is not visible in any log: two caps cross, and
+    every candidate is refused for being too small before a signal is even
+    read. So the arithmetic gets its own type, and `fund` prints it.
+
+    Equities are where this bites and crypto is not, for one reason: a share is
+    indivisible and some of them cost a thousand dollars. `whole_shares` turning
+    this off is what makes a small account expressible at all.
+    """
+
+    capital: float
+    cap_per_position: float
+    reachable: list[str]
+    unreachable: list[tuple[str, float]]
+    settings: Settings
+    needed_for_one: float
+    needed_for_all: float
+    """What the cached prices say a viable budget is, rather than what the
+    arithmetic says. `Settings.min_capital` is a lower bound that is not
+    attainable: a whole multiple of the share price has to land inside the
+    window, so at exactly the bound almost nothing fits."""
+
+    @property
+    def viable(self) -> bool:
+        return bool(self.reachable)
+
+    @property
+    def priced(self) -> int:
+        return len(self.reachable) + len(self.unreachable)
+
+    def report(self) -> str:
+        q = self.settings.quote
+        lines = []
+        if self.viable and not self.unreachable:
+            return ""
+        if not self.priced:
+            return "  (no cached prices yet — run `sync` to check the budget)"
+
+        if not self.viable:
+            lines += [
+                f"  !! at {self.capital:,.2f} {q} this agent cannot open a single"
+                " position.",
+                f"     One position is capped at {self.settings.max_position_pct:.0%}"
+                f" of equity, so {self.cap_per_position:,.2f} {q}, and the broker",
+                f"     minimum is {self.settings.min_notional:,.2f} {q}. Every"
+                " candidate is refused before a signal is read.",
+            ]
+        else:
+            worst = max(price for _, price in self.unreachable)
+            lines += [
+                f"  !  at {self.capital:,.2f} {q}, {len(self.unreachable)} of"
+                f" {self.priced} names cannot be entered:",
+                f"     one share of the dearest of them costs {worst:,.2f} {q} and"
+                f" a position here is capped at {self.cap_per_position:,.2f}.",
+                f"     The agent will trade the {len(self.reachable)} it can reach,"
+                " which is a different universe from the",
+                "     one the backtest measured.",
+            ]
+        lines += ["", "     Two ways out, and they are not the same decision:"]
+        if not self.viable:
+            lines.append(
+                f"       fund {self.needed_for_one:,.0f}    one position becomes"
+                " possible; the settings stay as measured"
+            )
+        lines += [
+            f"       fund {self.needed_for_all:,.0f}    all {self.priced} names"
+            " become reachable, which is the universe",
+            f"       {'':14}the backtest actually ran on",
+            "",
+            "       --config config/small-account.json   keeps the budget and makes"
+            " shares divisible.",
+            f"       {'':38}Then the broker's per-order fee decides",
+            f"       {'':38}the outcome, not the strategy — see the",
+            f"       {'':38}README. At a euro an order it loses money.",
+        ]
+        return "\n".join(lines)
+
+
+def can_enter(price: float, cap: float, settings: Settings) -> bool:
+    """Whether one position in a share at `price` fits between the caps.
+
+    With whole shares the smallest expressible position is one share, so the
+    question is whether some whole number of them lands in the window at all.
+    With fractional shares the price drops out and only the window matters.
+    """
+    if price <= 0 or cap <= 0:
+        return False
+    if not settings.whole_shares:
+        return cap >= settings.min_notional
+    shares = int(cap // price)
+    return shares >= 1 and shares * price >= settings.min_notional
+
+
+def smallest_viable(store: Store, settings: Settings) -> tuple[float, float]:
+    """The budget that reaches one name, and the budget that reaches them all.
+
+    `Settings.min_capital` is a lower bound and not an attainable number: with
+    whole shares a *whole multiple* of the share price has to land inside the
+    window, so at exactly the bound almost nothing fits. This asks the cached
+    prices instead of the arithmetic.
+    """
+    import math
+
+    prices = [p for p in _prices(store, settings).values() if p > 0]
+    if not prices:
+        return settings.min_capital, settings.min_capital
+    if not settings.whole_shares:
+        return settings.min_capital, settings.min_capital
+
+    needed = []
+    for price in prices:
+        shares = max(1, math.ceil(settings.min_notional / price))
+        needed.append(shares * price / settings.max_position_pct)
+    return min(needed), max(needed)
+
+
+def budget_check(store: Store, settings: Settings, capital: float) -> BudgetCheck:
+    cap = capital * settings.max_position_pct
+    reachable: list[str] = []
+    unreachable: list[tuple[str, float]] = []
+    for symbol, price in _prices(store, settings).items():
+        if can_enter(price, cap, settings):
+            reachable.append(symbol)
+        else:
+            unreachable.append((symbol, price))
+    one, every = smallest_viable(store, settings)
+    return BudgetCheck(
+        capital,
+        cap,
+        sorted(reachable),
+        sorted(unreachable),
+        settings,
+        needed_for_one=one,
+        needed_for_all=every,
+    )
 
 def status(store: Store, settings: Settings) -> str:
     from .agent import K_CASH, K_HALTED, K_NEXT_RUN, K_PEAK_EQUITY, K_PLAN
