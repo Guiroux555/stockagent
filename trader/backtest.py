@@ -448,6 +448,14 @@ def deflated_sharpe(
     `trials` has to be counted honestly, including the settings that were tried
     and discarded. Undercounting it is the easiest way to make this number say
     what you want.
+
+    Read what it covers, and only that. It deflates the Sharpe of the *equity
+    curve* for the number of settings tried on one history. It knows nothing
+    about how the universe was picked, nothing about the names that were
+    delisted before it was picked, and nothing about how correlated the bets
+    are with each other. A high deflated Sharpe next to a modest
+    correlation-corrected t is not a contradiction — the two statistics answer
+    different questions, and neither one rescues the other.
     """
     if observations < 30 or trials < 1 or sr_variance <= 0:
         return 0.0

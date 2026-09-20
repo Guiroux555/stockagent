@@ -385,8 +385,8 @@ dit rien sur le biais de l'échantillon, et celui-ci est massif :
 **Ces 87 valeurs sont celles qui sont grandes et cotées aujourd'hui.** Les
 rejouer depuis 1990 suppose qu'on les aurait choisies en 1990 — on ne l'aurait
 pas fait. Enron, Lehman, Kodak, Sears, Nortel, GM et des centaines d'autres n'y
-sont pas. C'est un **biais de survie**, aucune donnée gratuite ne le corrige, et
-il flatte la stratégie comme son panier. Un t de 2,98 sur un échantillon biaisé
+sont pas. C'est un **biais de survie**, et il flatte la stratégie comme son
+panier. Un t de 2,98 sur un échantillon biaisé
 est un t à propos d'un échantillon biaisé.
 
 C'est aussi pour ça que SPY est imprimé à côté : l'indice porte ses propres
@@ -823,6 +823,15 @@ jetés — avec une variance des Sharpe de 2,09 × 10⁻⁵ **mesurée** sur 56
 configurations réellement rejouées, pas supposée. Il ne distingue aucune
 variante.
 
+Et il faut lire ce qu'il couvre, rien de plus. Un DSR de 0,998 dit que le Sharpe
+de la **courbe d'équité** survit au nombre de réglages essayés sur cet
+historique. Il ne dit rien sur la façon dont l'univers a été choisi, rien sur
+les entreprises radiées avant qu'il ne soit choisi, et rien sur la corrélation
+des paris entre eux. Un DSR élevé à côté d'un t corrigé de la corrélation de
+2,98 n'est pas une contradiction : les deux statistiques répondent à des
+questions différentes, et aucune ne rachète l'autre. Le biais de survie reste
+le plus gros trou de ce document, et aucun de ces deux chiffres ne le voit.
+
 ### Pourquoi ça échoue, et c'est structurel
 
 | | |
@@ -882,8 +891,10 @@ satisfaisant qu'un filtre, et c'est ce que la mesure dit.
 
 - **Ce n'est pas un conseil financier** et ce n'est pas un système rentable
   démontré. Il gagne deux fois moins que l'indice sur 36 ans.
-- **Le biais de survie n'est pas corrigé** et ne peut pas l'être avec des
-  données gratuites. C'est le défaut principal, devant tous les autres.
+- **Le biais de survie n'est pas corrigé.** C'est le défaut principal, devant
+  tous les autres. Il n'est pas pour autant incorrigible — voir ci-dessous :
+  la moitié qui vient d'avoir *choisi* l'univers en 2026 se retire avec des
+  données gratuites, et ce n'est pas fait.
 - **Les paramètres ont été touchés après avoir vu les données.** Le
   hors-échantillon est un garde-fou, pas une preuve — et il dit d'ailleurs que
   le réglage n'a rien apporté.
@@ -988,12 +999,33 @@ Les deux tests les plus importants :
 
 ## Pistes suivantes
 
-- **Le biais de survie est le prochain vrai sujet**, et c'est un problème de
-  données, pas de code : il faudrait la composition historique d'un indice, qui
-  n'est pas gratuite. Tout le reste est du réglage à côté.
+- **Le biais de survie est le prochain vrai sujet**, et une affirmation
+  antérieure de ce README était trop forte : il n'est pas incorrigible. Le
+  problème a deux moitiés de coût très différent.
+
+  La première — avoir **choisi** l'univers en 2026 puis l'avoir rejoué depuis
+  1990 — se retire gratuitement : l'appartenance à un indice est publique et
+  son historique reconstructible, donc une entrée peut être refusée sur un nom
+  qui n'était pas dans l'indice à cette date. Ce n'est pas fait.
+
+  La seconde — les entreprises **mortes** — ne se retire pas gratuitement :
+  Yahoo et la plupart des API de courtiers ne conservent aucun historique de
+  prix pour un ticker radié, donc les faillites ne sont rejouables à aucun
+  prix. L'ordre de grandeur n'est pas anecdotique : sur les plus petites
+  valeurs d'un indice, un jeu de données incluant les radiées donne une
+  croissance plusieurs fois inférieure.
+
+  L'écart entre le panier et SPY, imprimé à chaque run, est la borne la moins
+  chère de ce que ça vaut.
 - Le réglage in-sample n'a rien rendu hors échantillon. La conclusion raisonnable
   n'est pas de mieux régler, c'est d'arrêter de régler et de chercher un signal
   différent, testé avec la même discipline avant d'être activé.
+- **Le filtre de force relative a été testé au mauvais horizon.** La
+  littérature du momentum actions documente le **12-1** — formation sur 252
+  séances en sautant les 21 dernières — et `rs_lookback` vaut 63. Les balayages
+  à 63, 126 et 252 séances qui l'ont condamné n'ont jamais essayé la
+  construction publiée. Le verdict « désactivé » tient probablement, mais il a
+  été rendu sans avoir jugé le bon prévenu.
 - **La perte sur gap reste non bornée**, et la mesure dit que le calendrier
   n'est pas le bon outil pour la borner. Ce qui reste à tester est du côté du
   dimensionnement : plafonner la perte attendue sur gap plutôt que la perte au

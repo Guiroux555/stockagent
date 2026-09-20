@@ -58,8 +58,25 @@ class Settings:
 
     Every name on this list is a company that is large and listed *today*. The
     survivorship bias that creates is the single worst problem with the
-    backtest, it cannot be fixed with free data, and it is why the report
-    benchmarks against SPY as well as against this basket."""
+    backtest, and it is why the report benchmarks against SPY as well as
+    against this basket.
+
+    An earlier version of this docstring said the bias could not be fixed with
+    free data. That was too strong, and the correction is worth keeping rather
+    than quietly editing out. The bias has two halves and they do not cost the
+    same:
+
+    * **Choosing the universe in 2026 and replaying it from 1990.** This half
+      is free to remove. Index membership is public and its history is
+      reconstructible, so an entry can be refused on a name that was not in the
+      index on that date. Nothing here does that yet.
+    * **The companies that died.** This half is not free. Yahoo and most broker
+      APIs keep no price history for delisted tickers, so the failures cannot
+      be replayed at any price.
+
+    So: reducible and quantifiable, not incorrigible. The gap between this
+    basket and SPY is the cheapest bound on how much it is worth, and the
+    report prints it on every run."""
 
     sectors: tuple[tuple[str, str], ...] = (
         ("Information technology", "AAPL MSFT NVDA AVGO ORCL CSCO ADBE CRM AMD"
