@@ -168,6 +168,8 @@ class Order:
     with it and cancelled if the market gapped away overnight."""
     stop: float = 0.0
     atr: float = 0.0
+    fraction: float = 1.0
+    """Share of the position to sell, for a scale-out. Ignored on a buy."""
     created_ts: int = 0
 
     @property

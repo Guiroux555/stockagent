@@ -84,11 +84,24 @@ class Settings:
     quote: str = "USD"
 
     # --- risk ------------------------------------------------------------
-    risk_per_trade: float = 0.006
+    risk_per_trade: float = 0.003
     """Fraction of equity lost if the stop is hit. Position size is derived
     from this and the stop distance, never set as a fixed notional."""
-    max_position_pct: float = 0.08
-    max_concurrent: int = 12
+    max_position_pct: float = 0.04
+    max_concurrent: int = 25
+    """Twenty-five positions, not twelve.
+
+    Widening the book buys no return at all — 12, 18, 25 and 35 slots all land
+    within half a point of the same CAGR, in-sample and out. What it buys is
+    the disappearance of single-trade dependence: the best position falls from
+    10.8% of all gains to 7.0% in-sample, and the worst drawdown from 19.5% to
+    14.4%. The risk budget per position is cut to keep the total constant, so
+    this is the same money spread over twice as many bets.
+
+    This is the thing the crypto version of this agent tried and could not get.
+    There, quadrupling the universe left effective independence at 1.46 assets
+    out of twenty because everything correlated at 0.67. Here it works, and the
+    reason is the only structural advantage equities have: sectors decouple."""
     max_exposure_pct: float = 0.75
     daily_loss_limit: float = 0.04
     """Equity drawdown within one session that halts new entries until the
@@ -134,15 +147,41 @@ class Settings:
     rsi_period: int = 14
     atr_period: int = 14
     stop_atr_mult: float = 4.0
-    trail_atr_mult: float = 5.0
+    """Initial stop distance. With size derived from the stop, this is mostly a
+    leverage dial rather than a signal setting: from 2 to 8 ATR the return and
+    the drawdown move together and CAGR-per-drawdown stays between 0.39 and
+    0.45. Four sits in the middle of that flat stretch."""
+    trail_atr_mult: float = 8.0
+    """Wide, and the measurement is blunt about why: on daily bars the trailing
+    stop does not earn its place.
+
+    In-sample and out of sample alike, return rises monotonically as the trail
+    widens and flattens once it stops binding — 3 ATR costs half the return of
+    8, and switching it off entirely is marginally better again. A 5 ATR trail,
+    which is what the crypto version of this agent settled on, gives up about
+    two points of CAGR here. The reason is arithmetic: a daily ATR is around
+    1.5% of price, so 5 ATR is a 7% pullback, and large caps hand back 7%
+    inside perfectly healthy year-long trends. On 4h candles that same multiple
+    is a far smaller move relative to the trend it is trying to survive.
+
+    Eight is the point where it stops hurting. Leaving it there rather than
+    disabling it costs roughly 0.7 points of out-of-sample CAGR, and buys a
+    defined worst case on a position that has run a long way above its EMA 200
+    — the one situation the regime exit is slow to handle. That trade is a
+    judgement call, and it is stated here rather than hidden in a number."""
     take_profit_r: float = 0.0
     """Fixed profit target in R, disabled (0) by default. A trend follower
     with a low win rate needs its winners open-ended."""
     rsi_overbought: float = 78.0
     min_atr_pct: float = 0.005
     max_atr_pct: float = 0.10
-    """Daily ATR as a fraction of price. A large cap sits near 1.5%; the band
-    excludes a dead tape below and an unhedgeable one above."""
+    """Daily ATR as a fraction of price. A large cap sits near 1.5%.
+
+    Measured, this band is inert: removing it changes the backtest by nothing
+    at all, to the last basis point, because a US large cap essentially never
+    trades outside it. It is kept as a guard against a name that stops behaving
+    like one — a halt, a takeover, a collapse — and is reported as inert rather
+    than quietly credited with the result."""
     trend_slope_lookback: int = 5
     breakout_bars: int = 20
     """The entry trigger: a close above the highest high of the previous N
@@ -170,10 +209,27 @@ class Settings:
 
     SPY rather than a breadth threshold: it is one well-defined condition, it
     is the thing every US equity is actually correlated to, and it does not
-    need a number tuned on the same data the strategy was tuned on."""
+    need a number tuned on the same data the strategy was tuned on.
+
+    Its measured value depends entirely on whether the window contains a bear
+    market, and saying so is the honest version of this docstring. Over
+    1990-2012, which holds two 50% index drawdowns, removing it doubles the
+    worst drawdown (14.4% to 30.6%). Over 2012-2026, which holds one real bear
+    market and two crashes that recovered within months, removing it is
+    *better* (CAGR per drawdown 0.61 against 0.47). A protection is not
+    evaluated on a period that did not need it, so it stays on — but it cost
+    about 0.2 points of out-of-sample CAGR, and that number belongs here."""
 
     # --- relative strength (cross-sectional) ------------------------------
     rs_top_k: int = 0
+    """Only the `k` strongest names may be entered; 0 turns the filter off.
+
+    Off by default because it was measured and it does nothing. The crypto
+    version of this agent blamed its own small universe — cross-sectional
+    momentum is built for hundreds of names, not five correlated coins. That
+    hypothesis is testable here and it is wrong: across eighty-seven names,
+    every setting from top-10 to top-60 either loses return or is
+    indistinguishable from leaving it off."""
     rs_lookback: int = 63
     """Sessions used to measure relative strength. 63 ~ one quarter."""
     rs_vol_normalise: bool = True
