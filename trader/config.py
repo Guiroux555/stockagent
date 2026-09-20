@@ -126,6 +126,36 @@ class Settings:
     quote: str = "USD"
 
     # --- risk ------------------------------------------------------------
+    sizing_mode: str = "risk"
+    """`risk` or `notional`. How much to buy, which may be the whole edge.
+
+    `risk` derives the quantity from the distance to the stop, so a volatile
+    name receives less notional than a calm one. That is inverse-volatility
+    weighting wearing a risk-management hat, and the literature on time-series
+    momentum argues it is what actually produces the returns — that stripping
+    the volatility scaling leaves a signal indistinguishable from buy and hold.
+
+    `notional` puts the same fraction of equity into every position and keeps
+    the stop for the exit only. Same signals, same stops, different weights.
+
+    It was measured, and the answer is that **the edge is the signal**: taking
+    the volatility scaling away does not kill it. What the measurement did not
+    settle is whether equal weighting is *better*, even though it returns more
+    in every window and wins ten of twelve walk-forward windows — because 84%
+    of that advantage comes from the most volatile third of the universe, and
+    six semiconductor names carry half of it. Overweighting volatile survivors
+    is exactly the bet that a universe chosen in 2026 flatters most. Scaling
+    them down is, by accident, a partial hedge against the bias in the data.
+
+    So `risk` stays the default, and the reason is stated rather than implied:
+    not because it measured better, but because the measurement cannot tell the
+    two explanations apart. The README carries the numbers."""
+
+    notional_per_slot: float = 0.0
+    """Fraction of equity per position in `notional` mode; 0 derives it from
+    the exposure cap divided by the number of slots, which is the setting that
+    makes the two modes comparable rather than a leverage comparison."""
+
     risk_per_trade: float = 0.003
     """Fraction of equity lost if the stop is hit. Position size is derived
     from this and the stop distance, never set as a fixed notional."""

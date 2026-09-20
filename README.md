@@ -885,6 +885,115 @@ tableau utile.
 `risk_per_trade`, qui existe déjà — et pas le calendrier.** C'est moins
 satisfaisant qu'un filtre, et c'est ce que la mesure dit.
 
+
+---
+
+## L'edge est-il le signal, ou la taille ?
+
+C'est la question la plus dérangeante qu'on puisse poser à cet agent, et elle a
+une réponse.
+
+La littérature sur le momentum de série temporelle soutient que les résultats
+publiés sont largement portés par la **normalisation par la volatilité**, pas
+par le signal de momentum : sans elle, le rendement cumulé devient comparable à
+un simple buy-and-hold. Or cet agent fait de la normalisation par la volatilité
+sans l'appeler ainsi. La formule
+
+```
+quantité = (capital × risque%) / (prix d'entrée − stop)
+```
+
+avec un stop à 4 × ATR revient à dimensionner en inverse de la volatilité : une
+valeur deux fois plus agitée reçoit deux fois moins de notionnel. Ce n'est
+peut-être pas un détail de gestion du risque. C'est peut-être **le moteur**.
+
+Le test est direct : rejouer tout l'historique avec un **notionnel fixe** —
+mêmes signaux, mêmes stops, mêmes places, mais la taille ne dérive plus de la
+distance au stop. `sizing_mode = "notional"`.
+
+```
+                     mode risque          notionnel fixe
+ATR 1,35%            4,00% du capital     3,00% du capital
+ATR 2,02%            3,69%                3,00%
+ATR 4,31%            1,74%                3,00%
+risque par position  300 USD, constant    163 à 518 USD
+```
+
+### Ce que ça donne
+
+| | rendement | CAGR | maxDD | CAGR/DD | expo | Sharpe |
+|---|---|---|---|---|---|---|
+| **complet** | | | | | | |
+| risque (livré) | +1 555,9% | 8,14% | **15,9%** | **0,51** | 59% | 0,0573 |
+| notionnel fixe | **+2 570,8%** | **9,60%** | 19,8% | 0,48 | 60% | 0,0595 |
+| **in-sample** | | | | | | |
+| risque | +407,8% | 7,99% | **14,4%** | **0,55** | 56% | 0,0549 |
+| notionnel fixe | **+556,9%** | **9,31%** | 19,8% | 0,47 | 57% | 0,0552 |
+| **hors échantillon** | | | | | | |
+| risque | +214,6% | 8,10% | 17,1% | 0,47 | 65% | 0,0585 |
+| notionnel fixe | **+302,7%** | **9,93%** | **16,4%** | **0,61** | 64% | **0,0664** |
+
+L'exposition moyenne est la même à un point près (59% contre 60%), donc ce
+n'est pas une comparaison de levier — c'est bien une comparaison de
+**pondération**. Le contrôle explicite, en calibrant le notionnel à exposition
+strictement égale (2,97% par place), donne le même résultat : +2 465,9%.
+
+En walk-forward sur douze fenêtres de trois ans, le notionnel fixe gagne dans
+**10 fenêtres sur 12**, médiane +29,0% contre +25,0%, et sa pire fenêtre est
+meilleure (+17,0% contre +15,0%). Il paie 1,2 point de drawdown moyen (11,8%
+contre 10,6%).
+
+**Donc l'edge est le signal.** Retirer la normalisation par la volatilité ne le
+tue pas — le travail sur le déclencheur n'était pas du bruit ajusté, et c'est la
+meilleure nouvelle que ce test pouvait produire.
+
+### Et pourtant le défaut ne change pas
+
+Parce que la deuxième lecture — « donc il faut passer au notionnel fixe » — ne
+survit pas à la question « d'où vient l'écart ? ».
+
+| tiers de volatilité | ATR médian | P&L mode risque | P&L notionnel | écart |
+|---|---|---|---|---|
+| le plus calme | 1,80% | 218 967 | 239 680 | +20 714 |
+| médian | 2,22% | 459 516 | 604 411 | +144 895 |
+| **le plus volatil** | **2,89%** | **877 397** | **1 726 743** | **+849 346** |
+
+**84% de l'avantage vient du tiers le plus volatil**, et six valeurs en portent
+la moitié : AMD (13% de l'écart), TSLA (12%), NVDA (10%), AMAT (7%), INTC (6%),
+QCOM (6%).
+
+Or surpondérer les valeurs volatiles d'un univers **choisi en 2026** est
+précisément le pari que le biais de survie flatte le plus. Les semi-conducteurs
+volatils qui ont survécu sont ceux qui ont fait ×100 ; les volatils qui sont
+morts — Nortel, Sun, Lucent, et des dizaines d'autres — ne sont pas dans les
+données du tout. Le dimensionnement par le stop les sous-pondère, et c'est par
+accident une couverture partielle contre le biais du jeu de données.
+
+La mesure ne sait pas distinguer « l'équipondération est meilleure » de « les
+survivants de ce jeu de données sont volatils ». Tant qu'elle ne le sait pas,
+changer le défaut serait exactement l'erreur que ce README documente ailleurs.
+
+`sizing_mode = "risk"` reste le défaut, **non pas parce qu'il mesure mieux —
+il mesure moins bien — mais parce que l'explication de l'écart n'est pas
+tranchée.** Les deux modes sont livrés ; `python -m trader --config` permet de
+choisir.
+
+### Ce que ça change pour la suite
+
+La bonne façon de trancher n'est pas un réglage de plus, c'est le §6 des limites
+ci-dessous : filtrer l'appartenance à l'indice à la date, ce qui est gratuit.
+Si l'avantage du notionnel fixe survit à un univers point-in-time, il est réel.
+S'il s'évapore, il était le biais de survie tout du long. **C'est le test qui
+rend le plus d'information par unité d'effort dans tout ce projet.**
+
+### Une note sur le DSR ici
+
+Il ne sert à rien sur cette comparaison : il sature à 1,000 pour les deux modes.
+Avec 5 300 séances et un Sharpe par séance de 0,057, la déflation ne mord pas —
+ce qui est la bonne réponse à la question qu'il pose (« ce Sharpe survit-il au
+nombre d'essais ? ») et une non-réponse à celle qui compte ici (« lequel des
+deux modes préférer ? »). Une statistique qui sature n'arbitre rien.
+
 ---
 
 ## Ce que ce projet ne prouve pas
@@ -1016,7 +1125,10 @@ Les deux tests les plus importants :
   croissance plusieurs fois inférieure.
 
   L'écart entre le panier et SPY, imprimé à chaque run, est la borne la moins
-  chère de ce que ça vaut.
+  chère de ce que ça vaut. Et depuis le test du notionnel fixe, ce n'est plus
+  seulement une limite à déclarer : c'est le test qui décide si
+  l'équipondération vaut mieux que le dimensionnement par le stop, ou si elle
+  ne fait que surpondérer des survivants.
 - Le réglage in-sample n'a rien rendu hors échantillon. La conclusion raisonnable
   n'est pas de mieux régler, c'est d'arrêter de régler et de chercher un signal
   différent, testé avec la même discipline avant d'être activé.

@@ -128,3 +128,77 @@ def test_the_position_limit_blocks_entries(settings):
     cfg = replace(settings, max_concurrent=2)
     g = guard(cfg, 100_000, 100_000, 100_000, positions=2)
     assert not g.allowed and "position limit" in g.reason
+
+
+# --- the two ways of deciding how much -------------------------------------
+
+
+def test_risk_sizing_is_the_default(settings):
+    assert settings.sizing_mode == "risk"
+
+
+def test_risk_sizing_gives_the_volatile_name_less(settings):
+    """This is inverse-volatility weighting wearing a risk-management hat, and
+    naming it that way is the point of the comparison below."""
+    cfg = replace(settings, whole_shares=False, max_position_pct=1.0)
+    pf = Portfolio(cfg)
+    calm = size(pf, 100.0, 100 * (1 - 4 * 0.0135), cfg)
+    wild = size(pf, 100.0, 100 * (1 - 4 * 0.0431), cfg)
+    assert calm.qty > wild.qty * 2
+
+
+def test_notional_sizing_gives_every_name_the_same(settings):
+    cfg = replace(settings, sizing_mode="notional", whole_shares=False)
+    pf = Portfolio(cfg)
+    calm = size(pf, 100.0, 100 * (1 - 4 * 0.0135), cfg)
+    wild = size(pf, 100.0, 100 * (1 - 4 * 0.0431), cfg)
+    assert calm.qty == pytest.approx(wild.qty)
+    assert "fixed notional" in calm.reason
+
+
+def test_notional_sizing_lets_the_risk_vary_instead(settings):
+    """Same money in, different money at stake. That is exactly the quantity
+    the risk mode holds constant, so the two modes trade one for the other."""
+    cfg = replace(settings, sizing_mode="notional", whole_shares=False)
+    pf = Portfolio(cfg)
+    calm = size(pf, 100.0, 100 * (1 - 4 * 0.0135), cfg)
+    wild = size(pf, 100.0, 100 * (1 - 4 * 0.0431), cfg)
+    assert wild.risk_amount > calm.risk_amount * 2
+
+
+def test_the_default_slot_size_comes_from_the_exposure_cap(settings):
+    """Derived rather than set, so the two modes run at comparable exposure and
+    the comparison is about weighting rather than about leverage."""
+    cfg = replace(settings, sizing_mode="notional", whole_shares=False)
+    pf = Portfolio(cfg)
+    sizing = size(pf, 100.0, 90.0, cfg)
+    expected = cfg.max_exposure_pct / cfg.max_concurrent
+    assert sizing.qty * 100.0 / cfg.initial_capital == pytest.approx(expected, rel=1e-3)
+
+
+def test_the_slot_size_can_be_set_explicitly(settings):
+    cfg = replace(
+        settings, sizing_mode="notional", whole_shares=False,
+        notional_per_slot=0.05, max_position_pct=0.10,
+    )
+    pf = Portfolio(cfg)
+    sizing = size(pf, 100.0, 90.0, cfg)
+    assert sizing.qty * 100.0 / cfg.initial_capital == pytest.approx(0.05, rel=1e-3)
+
+
+def test_notional_sizing_still_obeys_every_cap(settings):
+    cfg = replace(
+        settings, sizing_mode="notional", whole_shares=False,
+        notional_per_slot=0.5, max_position_pct=0.02,
+    )
+    pf = Portfolio(cfg)
+    sizing = size(pf, 100.0, 90.0, cfg)
+    assert "max position" in sizing.reason
+    assert sizing.qty * 100.0 <= cfg.initial_capital * 0.02 * 1.001
+
+
+def test_notional_sizing_still_refuses_a_stop_above_the_entry(settings):
+    """The stop is kept for the exit. Removing it from the size calculation
+    does not make a nonsensical one acceptable."""
+    cfg = replace(settings, sizing_mode="notional")
+    assert not size(Portfolio(cfg), 100.0, 105.0, cfg).ok

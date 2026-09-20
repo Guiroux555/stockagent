@@ -68,9 +68,20 @@ def size_position(
     if scale == 0.0:
         return Sizing(0.0, "size scaled to zero")
 
-    risk_amount = equity * settings.risk_per_trade * scale
-    qty = risk_amount / stop_distance
-    binding = "risk budget"
+    if settings.sizing_mode == "notional":
+        # Equal weight per slot. The stop is still where it was — it just no
+        # longer decides how much is bought, which is the whole point of the
+        # comparison this mode exists for.
+        per_slot = settings.notional_per_slot or (
+            settings.max_exposure_pct / max(settings.max_concurrent, 1)
+        )
+        qty = equity * per_slot * scale / fill
+        risk_amount = qty * stop_distance
+        binding = "fixed notional"
+    else:
+        risk_amount = equity * settings.risk_per_trade * scale
+        qty = risk_amount / stop_distance
+        binding = "risk budget"
 
     # Never let one name dominate the book, however tight its stop.
     cap_position = equity * settings.max_position_pct * scale / fill
