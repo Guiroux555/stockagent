@@ -40,6 +40,8 @@ python -m trader status              # compte, positions, ordres en attente
 python -m trader watch               # ce que la stratégie voit, valeur par valeur
 python -m trader trends              # tendances court et moyen terme, par secteur et par valeur
 python -m trader news --sync         # collecte et archive les titres de presse
+python -m trader events --sync       # calendrier de résultats, depuis SEC EDGAR
+python -m trader events --gaps       # les gaps d'ouverture les jours de résultats
 python -m trader log -n 30           # journal des décisions, HOLD compris
 python -m trader reset               # remet le compte à zéro, garde l'historique
 ```
@@ -704,6 +706,176 @@ C'est aussi pour ça que `news_enabled` est à `false` par défaut : aujourd'hui
 la collecte coûte une requête par valeur et par tick, et ne rapporte qu'une
 archive plus longue demain.
 
+
+---
+
+## Les résultats trimestriels : le seul endroit où `risk.py` ment
+
+`risk.py` fait une promesse : une position perd `risk_per_trade` du capital si
+le stop saute. Une publication de résultats casse cette promesse, et pas d'un
+peu. Le stop n'est pas traversé, il est **sauté** — `strategy.stop_hit` modélise
+déjà ça honnêtement en remplissant à l'ouverture plutôt qu'au stop — donc la
+perte sur un gap nocturne n'est bornée par rien dans la couche de risque.
+`max_gap_atr` couvre l'entrée. Rien ne couvrait la détention.
+
+**Ce n'est pas un module d'actualités, et la distinction est toute la
+conception.** `news.py` collecte des titres et n'est branché sur rien, parce
+qu'un signal de sentiment n'est pas backtestable ici. Une *date* de résultats
+est un autre objet : elle est annoncée des semaines à l'avance, elle vient d'un
+dépôt et non d'une interprétation, et elle dit *quand*, jamais *quoi*. C'est
+précisément pour ça qu'elle ne peut que refuser un trade, jamais en suggérer un.
+
+### La source : SEC EDGAR, formulaire 8-K item 2.02
+
+Gratuit, officiel, sans clé, GET seulement, et point-in-time par construction :
+une date de dépôt est ce qu'elle est et n'est jamais révisée. Yahoo est écarté,
+son endpoint calendrier exigeant désormais un crumb de session.
+
+Deux détails décident de la justesse :
+
+- **L'heure d'acceptation compte.** Un communiqué accepté à 16h30 à New York ne
+  peut pas bouger un marché fermé à 16h00 : sa séance est la suivante. Dater
+  l'événement par le jour de dépôt poserait le blackout un jour trop tôt et
+  laisserait le vrai jour ouvert.
+- **Les dates futures ne sont pas récupérées mais projetées** depuis
+  l'historique de dépôts de l'entreprise. Ça ne lit que des dépôts déjà advenus,
+  donc c'est utilisable dans un backtest.
+
+Couverture : **7 925 publications, 2004-10 à 2026-09**. L'item 2.02 date d'août
+2004 ; avant, les résultats sortaient par communiqué sans dépôt sur lequel
+s'appuyer, et le module n'a rien à en dire.
+
+Un trou a été trouvé par le contrôle de couverture, pas deviné : la carte
+ticker → CIK de la SEC pointe vers le déposant d'aujourd'hui, si bien qu'Exxon
+arrivait avec **1** publication contre 21 ans de prix et BlackRock avec **8**,
+tous deux s'étant réorganisés. Les CIK prédécesseurs sont fusionnés et le
+contrôle continue de tourner : 84 calendriers sur 87 sont utilisables, et les
+trois restants sont signalés plutôt que silencieusement à moitié protégés. Un
+nom à moitié couvert est pire que pas de calendrier du tout — il bloque les
+séances qu'il connaît, laisse les autres ouvertes, et ressemble à une protection
+dans les deux cas.
+
+### Étape 1 : y a-t-il quelque chose à filtrer ?
+
+```bash
+python -m trader events --gaps
+```
+
+Sur 7 776 séances de résultats contre 460 135 autres, depuis 2005 :
+
+| \|ouverture / clôture veille − 1\| | jours de résultats | autres jours | ratio |
+|---|---|---|---|
+| médiane | 1,89% | 0,38% | ×5,0 |
+| 95e centile | 9,10% | 1,90% | ×4,8 |
+| 99e centile | 15,39% | 3,79% | ×4,1 |
+| **gap au-delà de 4 × ATR** | **4,10%** | **0,02%** | **×189** |
+| gap au-delà de 8 × ATR | 0,24% | 0,00% | ×281 |
+
+La queue est là, sans ambiguïté. Une nuance honnête quand même : le **pire** gap
+de tout l'historique est un jour sans résultats (62,3% contre 39,4%). Un
+blackout traite la queue systématique, pas toute la queue.
+
+Le multiple, recalculé avec les ATR réellement mesurés — médiane **2,02%** et
+non 1,5%, plage 1,35% à 4,31% — et les réglages livrés : un gap de −20% coûte
+**2,5 fois** le budget par trade, un gap de −35% en coûte **4,3**.
+
+Et le dégât réellement subi, qui est plus petit que la théorie : sur 2 313
+positions depuis 2005, la pire perte unique vaut 0,49% du capital (1,6 fois le
+budget) et 7 pertes sur 1 377 dépassent 1,25 fois. Le lien existe là où il
+compte — 6 des 10 pires positions sortent un jour de résultats, et la perte
+médiane d'un perdant « jour de résultats » est presque double (0,23% contre
+0,13%) — mais ces positions ne portent que 6,8% de la perte totale.
+
+Les deux cas qui motivaient l'exercice sont vérifiés : META a bien ouvert à
+−24,3% le 3 février 2022 et NFLX à −21,2% le 21 janvier. **L'agent n'en détenait
+aucune.** Sur 1 693 séances de résultats traversées en position, 12 ont ouvert
+sous −10%, la pire étant META à −19,6% en juillet 2018.
+
+### Étape 4 : le filtre, jugé sur la queue et non sur le CAGR
+
+| variante | rendement | maxDD | **pire gap subi** | 10 pires | gain/perte | DSR |
+|---|---|---|---|---|---|---|
+| **désactivé** | **+349,9%** | 16,7% | **−19,6%** | −14 752 | **2,49** | 0,998 |
+| block, projeté | +293,6% | 16,7% | −19,6% | −12 911 | 2,38 | 0,996 |
+| block, programmé | +301,2% | 17,0% | −19,6% | −13 638 | 2,37 | 0,997 |
+| block large | +266,6% | 17,8% | −19,6% | −12 422 | 2,34 | 0,994 |
+| reduce 50% | +311,9% | 16,7% | −19,6% | −13 151 | 2,40 | 0,998 |
+| reduce 25% | +323,8% | 17,0% | −19,6% | −13 823 | 2,38 | 0,998 |
+
+**Le pire gap subi ne bouge pas d'un point de base.** C'est le chiffre que le
+filtre existe pour déplacer.
+
+Les « dix pires » semblent s'améliorer. Rapportés au compte qui les a produits,
+ils ne bougent pas non plus :
+
+| | 10 pires (USD) | équité finale | en % de l'équité |
+|---|---|---|---|
+| désactivé | −14 752 | 449 900 | **−3,28%** |
+| block, projeté | −12 911 | 393 588 | −3,28% |
+| reduce 50% | −13 151 | 411 886 | −3,19% |
+| block large | −12 422 | 366 642 | −3,39% |
+
+L'amélioration en dollars était entièrement l'effet d'un compte plus petit.
+
+Le **DSR** est calculé sur 150 essais comptés honnêtement — tous les réglages
+essayés sur cet historique depuis le début du projet, y compris ceux qui ont été
+jetés — avec une variance des Sharpe de 2,09 × 10⁻⁵ **mesurée** sur 56
+configurations réellement rejouées, pas supposée. Il ne distingue aucune
+variante.
+
+### Pourquoi ça échoue, et c'est structurel
+
+| | |
+|---|---|
+| durée de détention médiane | **35 séances** |
+| un trimestre | 63 séances |
+| positions traversant au moins une publication | **56,2%** |
+| positions en traversant deux ou plus | 14,8% |
+| durée médiane de celles qui en traversent une | 57 séances |
+
+Un blackout à l'entrée ne peut rien pour la majorité des positions. Il décale le
+moment de l'entrée ; la publication arrive quand même, en milieu de détention.
+Le −19,6% de META en juillet 2018 est arrivé sur une position ouverte depuis des
+semaines, et aucune fenêtre autour de l'entrée ne l'aurait évitée.
+
+C'est aussi pourquoi un proxy dérivé du prix — pic de volume plus gap, qui ne
+demande aucune donnée à acheter — n'a pas été mesuré comme alternative : il se
+déclencherait au même endroit, à l'entrée, et échouerait pour la même raison.
+Son déclencheur était de toute façon « si le calendrier s'avère trop incomplet »,
+et il ne l'est pas : 84 noms sur 87 utilisables, 0,4% seulement des intervalles
+entre publications dépassant 140 jours.
+
+### La sortie forcée avant publication, pré-enregistrée comme perdante
+
+L'attente était écrite avant de lancer : solder avant chaque publication coupe
+les longues gagnantes qui paient les petites pertes.
+
+| | rendement | maxDD | pire gap | gain/perte | positions |
+|---|---|---|---|---|---|
+| **désactivé** | **+349,9%** | 16,7% | −19,6% | **2,49** | 2 313 |
+| sortie 1 séance avant | +292,8% | 17,2% | −19,6% | 1,56 | 3 929 |
+| sortie 3 séances avant | +244,8% | **14,6%** | **−14,9%** | 1,47 | 4 000 |
+
+Confirmé : le ratio gain/perte s'effondre de 2,49 à 1,47, et le nombre de
+positions passe de 2 313 à 4 000 parce que les tendances sont hachées puis
+rachetées.
+
+À noter quand même, parce que c'est le seul résultat qui va dans l'autre sens :
+la sortie à 3 séances est **la seule variante qui déplace le pire gap** (−19,6%
+→ −14,9%) et le drawdown (16,7% → 14,6%). La seule chose qui borne un gap est de
+ne pas être là quand il arrive, et ça coûte 105 points de rendement.
+
+### Ce qu'il faut en retenir
+
+Le filtre est livré `earnings_mode = "off"`, avec ses mesures, comme le filtre de
+force relative de l'agent crypto. Le calendrier, lui, reste : il est exact, il
+est gratuit, il est point-in-time, et `python -m trader events` en fait un
+tableau utile.
+
+**Si l'on veut borner la perte sur gap, le levier est la taille de position —
+`risk_per_trade`, qui existe déjà — et pas le calendrier.** C'est moins
+satisfaisant qu'un filtre, et c'est ce que la mesure dit.
+
 ---
 
 ## Ce que ce projet ne prouve pas
@@ -722,6 +894,9 @@ archive plus longue demain.
   les dividendes sont implicitement réinvestis dans la position. Aucune fiscalité
   n'est modélisée, et sur une stratégie qui tourne 108 fois par an en
   plus-values court terme, ce n'est pas un détail.
+- **Le blackout de résultats est livré désactivé** parce qu'il ne déplace pas
+  le chiffre qu'il existe pour déplacer. La perte sur gap reste bornée par
+  rien, et c'est une faiblesse connue plutôt qu'un problème résolu.
 - **L'agent ne lit pas l'actualité pour décider**, et tant qu'il n'y a pas
   d'archive assez longue pour le tester, c'est une fonctionnalité absente, pas
   une fonctionnalité désactivée.
@@ -747,10 +922,12 @@ trader/
   ranking.py     force relative transversale (désactivée par défaut)
   trends.py      tendances 1s/1m/3m/6m/12m, par valeur et par secteur
   regime.py      régime de marché : ancre SPY + ampleur
+  events.py      calendrier de résultats (SEC EDGAR) + blackout — désactivé
   risk.py        dimensionnement par distance au stop, actions entières, coupe-circuits
   portfolio.py   compte virtuel : frais, slippage, P&L
   news.py        collecte et score des titres de presse — ne décide de rien
-  store.py       SQLite : séances, positions, ordres, trades, décisions, archive presse
+  store.py       SQLite : séances, positions, ordres, trades, décisions,
+                 calendrier de résultats, archive presse
   engine.py      LE pas de décision — partagé mot pour mot par le live et le backtest
   scheduler.py   quand se réveiller, sur un calendrier troué
   agent.py       boucle live : sync, rattrapage, tick, persistance, programmation
@@ -786,7 +963,7 @@ Une clé inconnue déclenche une erreur explicite plutôt qu'un silence.
 ## Tests
 
 ```bash
-python -m pytest        # 187 tests, hors ligne, ~11 s
+python -m pytest        # 226 tests, hors ligne, ~11 s
 python -m ruff check .
 ```
 
@@ -805,6 +982,9 @@ Les deux tests les plus importants :
   module d'actualités et `Engine.step` ne prend pas d'argument pour en
   recevoir. Une absence se perd facilement dans un refactor, donc elle est
   épinglée plutôt que confiée à un commentaire.
+- `test_the_calendar_never_reveals_a_filing_that_has_not_happened` — toute la
+  justification de l'usage des dates de résultats est qu'elles étaient connues
+  à l'époque, et elle s'effondre si le backtest voit un dépôt à venir.
 
 ## Pistes suivantes
 
@@ -814,6 +994,10 @@ Les deux tests les plus importants :
 - Le réglage in-sample n'a rien rendu hors échantillon. La conclusion raisonnable
   n'est pas de mieux régler, c'est d'arrêter de régler et de chercher un signal
   différent, testé avec la même discipline avant d'être activé.
+- **La perte sur gap reste non bornée**, et la mesure dit que le calendrier
+  n'est pas le bon outil pour la borner. Ce qui reste à tester est du côté du
+  dimensionnement : plafonner la perte attendue sur gap plutôt que la perte au
+  stop changerait `risk.py`, pas le chemin du signal.
 - **L'archive de presse est la seule chose de ce dépôt qui s'améliore toute
   seule.** Elle ne vaut rien aujourd'hui et vaudra quelque chose dans un an, à
   la seule condition qu'on laisse l'agent tourner. La règle qui la lira reste à
