@@ -58,8 +58,15 @@ class Settings:
 
     Every name on this list is a company that is large and listed *today*. The
     survivorship bias that creates is the single worst problem with the
-    backtest, it cannot be fixed with free data, and it is why the report
-    benchmarks against SPY as well as against this basket."""
+    backtest, and it is why the report benchmarks against SPY as well as
+    against this basket.
+
+    It is reducible on free data, though, which is not what this docstring
+    used to claim: point-in-time S&P 500 membership is reconstructible from the
+    revision history of the index's Wikipedia page, so an entry can be gated on
+    "was this name in the index on that date". What free data does *not* carry
+    is the price history of delisted names, so the bias shrinks and becomes
+    measurable rather than disappearing. See `docs/recherche-strategies.md`."""
 
     benchmark: str = "SPY"
     """Fetched and analysed like any other symbol, but never traded.
@@ -175,7 +182,15 @@ class Settings:
     # --- relative strength (cross-sectional) ------------------------------
     rs_top_k: int = 0
     rs_lookback: int = 63
-    """Sessions used to measure relative strength. 63 ~ one quarter."""
+    """Sessions used to measure relative strength. 63 ~ one quarter.
+
+    A quarter is not the horizon the equity momentum literature documents: that
+    one is 12-1, a twelve-month formation skipping the most recent month, i.e.
+    ~252 sessions less the last 21. If this filter is ever switched on here it
+    should be tested at that horizon first — see `docs/recherche-strategies.md`.
+    The crypto agent measured this filter as a loser and ships it disabled; the
+    literature agrees for crypto specifically, and disagrees for equities, so
+    the verdict does not carry over."""
     rs_vol_normalise: bool = True
 
     # --- decision cadence -------------------------------------------------
