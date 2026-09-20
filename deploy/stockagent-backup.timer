@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily snapshot of the stockagent database
+Documentation=file:///opt/stockagent/deploy/README.md
+
+[Timer]
+OnCalendar=daily
+# Two agents on one board, both with a timer: without this they would both
+# fire at midnight and compete for the same SD card — and midnight UTC is
+# barely two hours after this one's own decision.
+RandomizedDelaySec=30m
+# The line that matters on a board that is not always on: a snapshot missed
+# because the power was out runs at the next boot instead of being skipped.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

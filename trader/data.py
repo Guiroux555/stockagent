@@ -43,6 +43,55 @@ class DataError(RuntimeError):
     pass
 
 
+class OfflineError(DataError):
+    """The link is down, as opposed to this one name being unavailable.
+
+    Worth its own type because the two call for opposite responses: a bad
+    ticker is skipped and the sync carries on, while no link at all means every
+    remaining name will fail the same way and the sync should stop asking.
+    """
+
+
+class Link:
+    """One shared judgement, for the length of a sync, about whether the
+    internet is there.
+
+    Without it an outage is quadratically expensive. Every name independently
+    tries two hosts three times with backoff — call it twenty seconds of
+    sleeping and timing out — and eighty-eight of them turn a dead router into
+    a half-hour sync that ends with nothing fetched. That is longer than this
+    agent's whole margin before the next closing bell: it would never again be
+    idle, and would still know nothing.
+
+    So the first couple of names pay the full retry budget, and once they have
+    both failed at the *transport* layer the rest fail instantly. An HTTP error
+    does not count: a 404 on one ticker says something about that ticker, not
+    about the link.
+    """
+
+    def __init__(self, tolerance: int = 2) -> None:
+        self.tolerance = tolerance
+        self.consecutive = 0
+        self.reason = ""
+
+    @property
+    def down(self) -> bool:
+        return self.consecutive >= self.tolerance
+
+    def failed(self, exc: Exception) -> None:
+        self.consecutive += 1
+        self.reason = f"{type(exc).__name__}: {exc}"
+
+    def worked(self) -> None:
+        self.consecutive = 0
+        self.reason = ""
+
+    def check(self, what: str) -> None:
+        """Raise instead of dialling, once the link is known to be down."""
+        if self.down:
+            raise OfflineError(f"link down ({self.reason}) — skipping {what}")
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -53,22 +102,37 @@ def _get(url: str, timeout: float = 30.0) -> dict:
         return json.load(resp)
 
 
-def _request(path: str, params: dict, settings: Settings) -> dict:
+def _request(
+    path: str, params: dict, settings: Settings, link: Link | None = None
+) -> dict:
     """Try each configured host, with backoff, before giving up.
 
     The two Yahoo hosts serve the same data and rate-limit independently, so
     falling through the list keeps a long sync running when one of them starts
     answering 429.
+
+    Failures are sorted into two kinds on the way out, because they mean
+    different things. An HTTP status came from a server, so there *is* a link
+    and the problem is this request. A refused connection, a DNS failure or a
+    timeout is the link itself — that is what `link` accumulates, and what
+    turns the remaining names of an offline sync into instant failures.
     """
+    if link is not None:
+        link.check(str(params.get("symbol") or path))
     query = urllib.parse.urlencode(params)
     last: Exception | None = None
+    transport_only = True
     for host in settings.hosts:
         url = f"{host}{path}?{query}"
         for attempt in range(3):
             try:
-                return _get(url)
+                payload = _get(url)
+                if link is not None:
+                    link.worked()
+                return payload
             except urllib.error.HTTPError as exc:
                 last = exc
+                transport_only = False
                 if exc.code in (429, 999):  # rate limited: back off hard
                     time.sleep(2**attempt * 2)
                     continue
@@ -78,8 +142,19 @@ def _request(path: str, params: dict, settings: Settings) -> dict:
                     break  # bad request or blocked host: next host, no retry
                 time.sleep(2**attempt)
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                # No retry, and no backoff: retrying is for a server that said
+                # something (a rate limit, a 5xx). A connection that timed out
+                # said nothing, and asking the same unreachable host twice more
+                # costs a minute to learn what the first thirty seconds already
+                # established. Fall through to the other host instead; if that
+                # one is dead too, the next tick is five minutes away and will
+                # pick up a blip soon enough.
                 last = exc
-                time.sleep(2**attempt)
+                break
+    if transport_only:
+        if link is not None:
+            link.failed(last or OfflineError("unreachable"))
+        raise OfflineError(f"no host reachable for {path} {params}: {last}")
     raise DataError(f"all hosts failed for {path} {params}: {last}")
 
 
@@ -153,6 +228,7 @@ def fetch_bars(
     settings: Settings,
     start: str | None = None,
     end_time: int | None = None,
+    link: Link | None = None,
 ) -> list[Bar]:
     """Daily bars for `symbol` from `start` (a YYYY-MM-DD day) to now.
 
@@ -166,7 +242,9 @@ def fetch_bars(
         "interval": settings.interval,
         "events": "div,split",
     }
-    payload = _request(f"/v8/finance/chart/{urllib.parse.quote(symbol)}", params, settings)
+    payload = _request(
+        f"/v8/finance/chart/{urllib.parse.quote(symbol)}", params, settings, link=link
+    )
     chart = payload.get("chart") or {}
     if chart.get("error"):
         raise DataError(f"{symbol}: {chart['error'].get('description', chart['error'])}")
@@ -180,7 +258,12 @@ ALL_HISTORY = 0
 """Sentinel for `fetch_history`: take everything the source will serve."""
 
 
-def fetch_history(symbol: str, settings: Settings, bars: int | None = None) -> list[Bar]:
+def fetch_history(
+    symbol: str,
+    settings: Settings,
+    bars: int | None = None,
+    link: Link | None = None,
+) -> list[Bar]:
     """Closed daily bars for `symbol`.
 
     `bars=ALL_HISTORY` reaches back to `settings.history_start`, which for most
@@ -190,7 +273,7 @@ def fetch_history(symbol: str, settings: Settings, bars: int | None = None) -> l
     target = settings.history_bars if bars is None else bars
     unlimited = target == ALL_HISTORY
     start = settings.history_start if unlimited else None
-    ordered = fetch_bars(symbol, settings, start=start)
+    ordered = fetch_bars(symbol, settings, start=start, link=link)
     if unlimited:
         return ordered
     return ordered[-target:] if target else ordered

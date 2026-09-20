@@ -1,0 +1,104 @@
+# stockagent as a system service — see deploy/README.md for the whole story.
+#
+# Installed by deploy/install.sh, which also copies the checkout to
+# /opt/stockagent and creates the `stockagent` system user. Nothing here
+# needs editing: every path is fixed, so this file is the same on every board.
+#
+#   systemctl status stockagent
+#   journalctl -u stockagent -f
+
+[Unit]
+Description=stockagent — autonomous equity paper-trading agent (simulation only)
+Documentation=file:///opt/stockagent/deploy/README.md
+
+# Two orderings, and the second one is the one people forget. The network is
+# obvious. The clock is not: a Compute Module has no battery-backed RTC, so at
+# boot it believes it is whenever it last shut down. Every schedule the agent
+# keeps is wall-clock arithmetic, so starting before NTP has answered means
+# planning the next wake-up for a time that has already passed and pricing
+# sessions against a date that has not happened. The agent waits for the clock
+# itself as well — see `await_clock` — because ordering after a target only
+# helps if the unit providing it is enabled, and this way it does not matter.
+Wants=network-online.target
+After=network-online.target
+Wants=time-sync.target
+After=time-sync.target
+
+# systemd stops restarting a unit that fails 5 times in 10 seconds, and leaves
+# it stopped until a human intervenes. That default protects a server from a
+# crash loop; on an unattended board it converts a transient failure at boot
+# into an agent that is simply never running again. `Restart=always` is only
+# as good as this line.
+StartLimitIntervalSec=0
+
+[Service]
+# `notify` rather than `simple`, for the watchdog below and so `systemctl
+# status` can show the next wake-up on a board with no screen.
+Type=notify
+NotifyAccess=main
+
+# The failure that `Restart=always` cannot see: a process that is alive and
+# stuck. A wedged socket, a DNS lookup that never returns, a deadlock — none
+# of them exit, and from the outside they are indistinguishable from an agent
+# legitimately asleep between two closing bells. The run loop checks in every
+# thirty seconds (half of WATCHDOG_USEC, which systemd sets from this),
+# including once per name during a sync of eighty-eight of them. Ten minutes
+# of silence means stuck, and systemd kills and restarts it.
+WatchdogSec=600
+
+User=stockagent
+Group=stockagent
+WorkingDirectory=/opt/stockagent
+
+# /var/lib/stockagent, created and chowned by systemd on every start — so the
+# state survives a reinstall of the code, and a fresh board needs no mkdir.
+StateDirectory=stockagent
+StateDirectoryMode=0750
+
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The project has no runtime dependencies, so nothing is pip-installed into
+# the venv and `trader` is imported from the tree itself. Spelled out rather
+# than left to `python -m` picking up the working directory.
+Environment=PYTHONPATH=/opt/stockagent
+Environment=TRADER_DB=%S/stockagent/live.db
+ExecStart=/opt/stockagent/.venv/bin/python -m trader run
+
+Restart=always
+RestartSec=30
+TimeoutStopSec=30
+
+# Two agents share this board; neither should be able to make it unusable.
+Nice=5
+
+# --- confinement -------------------------------------------------------------
+# The agent makes unauthenticated GET requests to two public price hosts —
+# plus SEC EDGAR when the earnings calendar is switched on — and writes one
+# SQLite file. Everything else is denied, so a bad day for a dependency is not
+# a bad day for the board.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+# AF_UNIX is the notify socket; the other two are the price feed.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

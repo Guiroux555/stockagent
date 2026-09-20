@@ -142,7 +142,9 @@ def watchlist(store: Store, settings: Settings) -> str:
     views: dict[str, SymbolView] = {}
     short: list[str] = []
     for symbol in settings.universe:
-        bars = store.load_bars(symbol, settings.interval)
+        # Same bounded window as a live tick: these commands are run over ssh
+        # on the board itself, and they should cost what a tick costs.
+        bars = store.load_bars(symbol, settings.interval, limit=settings.live_window)
         if len(bars) < settings.warmup_bars:
             short.append(f"  {symbol:<8} not enough history ({len(bars)} sessions)")
             continue
@@ -178,7 +180,9 @@ def trend_board(store: Store, settings: Settings) -> str:
 
     views: dict[str, SymbolView] = {}
     for symbol in settings.universe:
-        bars = store.load_bars(symbol, settings.interval)
+        # The window covers the longest horizon this report reads (12 months,
+        # 252 sessions) — see `Settings.live_window`.
+        bars = store.load_bars(symbol, settings.interval, limit=settings.live_window)
         if len(bars) >= settings.warmup_bars:
             views[symbol] = SymbolView(analyze(bars, settings), len(bars) - 1)
     if not views:

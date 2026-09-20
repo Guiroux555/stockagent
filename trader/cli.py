@@ -10,6 +10,8 @@ python -m trader news              the headline archive, and what it is worth
 python -m trader events            the earnings calendar, its coverage and its gaps
 python -m trader watch             what the strategy sees right now
 python -m trader log               recent decisions, including the HOLDs
+python -m trader health            clock, data, database — exits non-zero if sick
+python -m trader backup            snapshot the database, keeping the last N
 python -m trader reset             wipe the account, keep the price history
 """
 
@@ -18,7 +20,9 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+from . import health as health_report
 from .agent import run_forever, run_tick, sync
 from .backtest import run_backtest
 from .config import DEFAULT_DB, Settings
@@ -116,6 +120,25 @@ def _parser() -> argparse.ArgumentParser:
         "--gaps",
         action="store_true",
         help="compare opening gaps on earnings sessions with every other session",
+    )
+
+    sub.add_parser(
+        "health",
+        help="clock, data freshness, database integrity; exit code 1 if degraded",
+    )
+
+    bk = sub.add_parser("backup", help="snapshot the database to a dated file")
+    bk.add_argument(
+        "--dir",
+        dest="directory",
+        default=None,
+        help="where snapshots go (default: a `backups` folder next to the database)",
+    )
+    bk.add_argument(
+        "--keep",
+        type=int,
+        default=7,
+        help="how many snapshots to keep; older ones are deleted (0 keeps all)",
     )
 
     lg = sub.add_parser("log", help="recent decisions")
@@ -227,6 +250,16 @@ def main(argv: list[str] | None = None) -> int:
             print(decision_log(store, args.n))
             return 0
 
+        if args.command == "health":
+            state = health_report.check(store, settings)
+            print(state.report())
+            # Non-zero on degraded, so this is usable as a check from cron, a
+            # systemd timer, or whatever watches the board from outside it.
+            return 0 if state.ok else 1
+
+        if args.command == "backup":
+            return _backup(store, args)
+
         if args.command == "reset":
             if not args.yes:
                 reply = input("wipe account, positions and trade history? [y/N] ")
@@ -238,6 +271,30 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     return 1
+
+
+def _backup(store: Store, args) -> int:
+    """Snapshot the database and rotate the old snapshots out.
+
+    Kept deliberately dumb: a dated copy of one SQLite file, made with
+    SQLite's own backup API so it is consistent even mid-write. Restoring is
+    `cp`, which is the property that matters at 2am — see deploy/README.md.
+    """
+    directory = (
+        Path(args.directory) if args.directory else Path(args.db).parent / "backups"
+    )
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest = store.backup(directory / f"{Path(args.db).stem}-{stamp}.db")
+
+    size = dest.stat().st_size / 1e6
+    print(f"  {dest}  ({size:.1f} MB)")
+
+    if args.keep > 0:
+        snapshots = sorted(directory.glob(f"{Path(args.db).stem}-*.db"))
+        for old_file in snapshots[: -args.keep]:
+            old_file.unlink()
+            print(f"  removed {old_file.name}")
+    return 0
 
 
 def _session_stamps(store: Store, settings: Settings) -> list[int]:

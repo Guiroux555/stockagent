@@ -9,6 +9,7 @@ did it buy that?" three weeks later.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import time
@@ -132,6 +133,17 @@ class Store:
         self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        # WAL alone survives a crash; it does not survive the plug being
+        # pulled, which on a board with no battery is the ordinary way to turn
+        # it off. Under `synchronous=NORMAL` — the default with WAL — the last
+        # commits sit in the page cache and a power cut takes them, so the
+        # agent comes back believing it still holds a position it closed. FULL
+        # fsyncs every commit. A tick commits a handful of times and writes a
+        # few kilobytes, so the cost is unmeasurable here and the guarantee is
+        # exactly the one an unattended appliance needs.
+        self.conn.execute("PRAGMA synchronous=FULL")
+        # A `status` run and a backup can read while the agent writes.
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
         self._migrate()
@@ -163,6 +175,11 @@ class Store:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {spec}")
 
     def close(self) -> None:
+        # Fold the WAL back into the main file so the database is one file
+        # again — which is what makes `cp live.db` a valid backup and what
+        # keeps an SD card from carrying an ever-growing sidecar.
+        with contextlib.suppress(sqlite3.Error):
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self.conn.close()
 
     def __enter__(self) -> Store:
@@ -170,6 +187,42 @@ class Store:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    # --- integrity & backup -----------------------------------------------
+
+    def integrity_check(self) -> str | None:
+        """`None` if the file is sound, else what SQLite says is wrong with it.
+
+        Called on every start, because the failure this guards against is not
+        hypothetical on a Pi: a power cut during a write on a cheap SD card can
+        leave a file that opens fine and fails on the first query. Finding that
+        out at boot, next to a known-good backup, beats finding it out three
+        weeks later in a stack trace.
+        """
+        try:
+            rows = self.conn.execute("PRAGMA integrity_check").fetchall()
+        except sqlite3.DatabaseError as exc:
+            return str(exc)
+        verdict = [r[0] for r in rows]
+        return None if verdict == ["ok"] else "; ".join(verdict)
+
+    def backup(self, dest: str | Path) -> Path:
+        """Copy the whole database to `dest`, online and atomically.
+
+        `sqlite3`'s own backup API is used rather than `cp`, because the agent
+        may well be mid-write: copying the file by hand while a WAL is open
+        produces something that looks like a database and is not one. The copy
+        lands on a temporary name and is renamed into place, so an interrupted
+        backup can never replace a good one with half a file.
+        """
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        tmp.unlink(missing_ok=True)
+        with sqlite3.connect(str(tmp)) as out:
+            self.conn.backup(out)
+        tmp.replace(dest)
+        return dest
 
     # --- bars -------------------------------------------------------------
 
@@ -196,18 +249,49 @@ class Store:
         self.conn.commit()
         return len(rows)
 
-    def replace_bars(self, symbol: str, interval: str, bars: Iterable[Bar]) -> int:
-        """Overwrite a symbol's whole series.
+    def replace_bars(
+        self,
+        symbol: str,
+        interval: str,
+        bars: Iterable[Bar],
+        known: dict[int, Bar] | None = None,
+    ) -> int:
+        """Make the stored series *be* `bars`, and write only what differs.
 
-        Needed because equity prices are *retroactively* restated: a split or
-        a dividend rewrites every bar before it. Merging a freshly adjusted
-        series into stale rows would leave a discontinuity at the join, and the
-        agent would read it as a gap that never happened.
+        The replacing is needed because equity prices are retroactively
+        restated: a split or a dividend rewrites every bar before it. Merging a
+        freshly adjusted series into stale rows would leave a discontinuity at
+        the join, and the agent would read it as a gap that never happened.
+
+        Writing only the difference is needed because of where this now runs. A
+        `DELETE` plus a full re-`INSERT` rewrote every row of the table on every
+        sync — eighty-eight names times thirty-six years of sessions, several
+        hundred thousand rows a day onto an SD card, to record one new close.
+        Flash wears out. The result is identical either way: rows the exchange
+        no longer serves are deleted, changed rows are overwritten, and on an
+        ordinary day exactly one row is written.
+
+        `known` is the caller's already-loaded copy of the series, since the
+        sync reads it anyway to count restatements; omit it and it is read here.
         """
-        self.conn.execute(
-            "DELETE FROM bars WHERE symbol=? AND interval=?", (symbol, interval)
-        )
-        return self.save_bars(symbol, interval, bars)
+        incoming = {b.open_time: b for b in bars}
+        if not incoming:
+            # An empty fetch is a failed fetch, not a delisting. Keeping the
+            # cache is the difference between one bad sync and a cold start.
+            return 0
+        if known is None:
+            known = {b.open_time: b for b in self.load_bars(symbol, interval)}
+
+        gone = [t for t in known if t not in incoming]
+        if gone:
+            self.conn.executemany(
+                "DELETE FROM bars WHERE symbol=? AND interval=? AND open_time=?",
+                [(symbol, interval, t) for t in gone],
+            )
+        changed = [b for t, b in incoming.items() if known.get(t) != b]
+        self.save_bars(symbol, interval, changed)
+        self.conn.commit()
+        return len(incoming)
 
     def load_bars(
         self,
@@ -221,8 +305,18 @@ class Store:
         if until is not None:
             sql += " AND close_time<=?"
             args.append(until)
-        sql += " ORDER BY open_time"
+        # The tail is taken in SQL, not in python. A live tick needs a few
+        # hundred sessions per name; reading thirty-six years of them into a
+        # list and throwing all but the tail away is the difference between a
+        # few megabytes and a few hundred on a board that may only have one.
+        if limit:
+            sql += " ORDER BY open_time DESC LIMIT ?"
+            args.append(limit)
+        else:
+            sql += " ORDER BY open_time"
         rows = self.conn.execute(sql, args).fetchall()
+        if limit:
+            rows = rows[::-1]
         bars = [
             Bar(
                 r["open_time"],
@@ -235,7 +329,7 @@ class Store:
             )
             for r in rows
         ]
-        return bars[-limit:] if limit else bars
+        return bars
 
     def last_bar_time(self, symbol: str, interval: str) -> int | None:
         row = self.conn.execute(

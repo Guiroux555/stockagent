@@ -1,0 +1,32 @@
+# One dated snapshot of the database. Driven by stockagent-backup.timer.
+#
+# Taken with SQLite's own backup API rather than `cp`, because the agent may
+# well be mid-write: copying the file by hand while a WAL is open produces
+# something that looks like a database and is not one.
+
+[Unit]
+Description=Snapshot the stockagent database
+Documentation=file:///opt/stockagent/deploy/README.md
+
+[Service]
+Type=oneshot
+User=stockagent
+Group=stockagent
+WorkingDirectory=/opt/stockagent
+StateDirectory=stockagent
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The project has no runtime dependencies, so nothing is pip-installed into
+# the venv and `trader` is imported from the tree itself. Spelled out rather
+# than left to `python -m` picking up the working directory.
+Environment=PYTHONPATH=/opt/stockagent
+Environment=TRADER_DB=%S/stockagent/live.db
+# Seven daily snapshots, ~a week of history, a few megabytes each. They land in
+# /var/lib/stockagent/backups; restoring one is a `cp`.
+ExecStart=/opt/stockagent/.venv/bin/python -m trader backup --keep 7
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=

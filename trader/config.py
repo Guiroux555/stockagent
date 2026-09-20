@@ -479,6 +479,31 @@ class Settings:
 
     # --- data -------------------------------------------------------------
     history_bars: int = 600
+    max_data_age_days: float = 4.0
+    """How stale the cache may get before the agent stops opening anything new.
+
+    This is the setting that makes an internet outage safe rather than merely
+    survivable. With no link the agent still wakes, still reads its cache and
+    still sees a perfectly valid breakout — on a session that closed last week.
+    Queuing an order for "the next open" against it means filling at an open
+    that has already happened, and the outage is precisely when the price is
+    most likely to have moved.
+
+    Exits are deliberately *not* gated on this: a stop is a promise made at
+    entry, and supervising it against the last known close is the honest thing
+    to do with stale data. Only new risk is refused.
+
+    Counted in calendar days rather than sessions because the market is shut
+    two thirds of the week: at 16:05 on a Monday the newest close is three days
+    old and nothing is wrong. Four days covers a long weekend with a holiday on
+    either side, and is still far shorter than any outage worth the name."""
+    live_bars: int = 0
+    """Sessions loaded per name on a live tick; 0 derives it from the warm-up.
+
+    A backtest wants everything. A live tick wants `warmup_bars` plus whatever
+    it slept through, and loading thirty-six years of sessions for eighty-eight
+    names to look at the last few hundred is how a 1 GB board runs out of
+    memory. See `Settings.live_window`."""
     history_start: str = "1990-01-01"
     """Earliest session to request on a full sync. Data exists well before
     this for some names; 1990 already spans four bear markets."""
@@ -511,6 +536,19 @@ class Settings:
             s for s in (self.benchmark, self.market_anchor) if s and s not in self.universe
         )
         return self.universe + tuple(dict.fromkeys(extra))
+
+    @property
+    def live_window(self) -> int:
+        """How many sessions a live tick needs per name.
+
+        The warm-up, plus the longest catch-up a tick will replay, plus enough
+        slack to also cover the twelve-month trend horizon that `trends.py`
+        reports on. Anything older cannot change a single number the agent
+        computes today, so reading it is pure cost — and on a Compute Module,
+        cost paid in the one resource the board does not have."""
+        if self.live_bars:
+            return self.live_bars
+        return max(self.warmup_bars + 120, 300)
 
     @property
     def warmup_bars(self) -> int:

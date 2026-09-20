@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
-from conftest import bars_from_closes, trending_closes
+from conftest import bars_from_closes, session_opens, trending_closes
 
 from trader.agent import (
     K_CASH,
@@ -19,7 +19,14 @@ from trader.agent import (
 )
 from trader.store import Store
 
-NOW = datetime(2026, 9, 21, 20, 30, tzinfo=timezone.utc)
+LAST_SESSION = datetime.fromtimestamp(session_opens(700)[-1] / 1000, timezone.utc)
+NOW = LAST_SESSION + timedelta(hours=7)
+"""The evening of the last synthetic session, just after its closing bell.
+
+Anchored to the fixtures rather than to a fixed date on purpose: the agent
+refuses to open anything when its newest session is days old, so a `now` that
+drifts away from the data turns every entry assertion in this file into a
+vacuous one — the test would keep passing while testing nothing."""
 
 
 @pytest.fixture

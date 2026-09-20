@@ -43,8 +43,55 @@ python -m trader news --sync         # collecte et archive les titres de presse
 python -m trader events --sync       # calendrier de résultats, depuis SEC EDGAR
 python -m trader events --gaps       # les gaps d'ouverture les jours de résultats
 python -m trader log -n 30           # journal des décisions, HOLD compris
+python -m trader health              # horloge, fraîcheur des données, intégrité de la base
+python -m trader backup              # instantané daté de la base, sept conservés
 python -m trader reset               # remet le compte à zéro, garde l'historique
 ```
+
+---
+
+## Le faire tourner en continu
+
+`python -m trader run` boucle indéfiniment : il dort jusqu'à la prochaine
+cloche de clôture, rejoue les séances closes pendant son sommeil, décide, puis
+reprogramme le suivant. Entre deux séances il ne consomme rien — avec une
+décision par jour ouvré, il dort plus de 99 % du temps.
+
+**Tout l'état vit dans le fichier SQLite**, donc l'arrêter et le relancer ne
+coûte rien : il reprend où il en était et rattrape ce qu'il a manqué. C'est ce
+qui rend un redémarrage automatique sûr.
+
+### Sur une carte dédiée — Raspberry Pi / Compute Module 4
+
+C'est là qu'il est censé vivre, et un seul script l'y installe :
+
+```bash
+sudo ./deploy/install.sh
+```
+
+Ce qui donne un service systemd démarré au boot, sans session ouverte, un
+instantané quotidien de la base et un chien de garde.
+**[deploy/README.md](deploy/README.md)** détaille chaque morceau ; le résumé
+tient en quatre propriétés :
+
+* **Il redémarre tout seul.** Plantage, coupure de courant, `reboot` : le
+  service repart, relit la base et rejoue les séances closes pendant l'arrêt —
+  les stops au repos ont pu être touchés et les ordres en attente exécutés à
+  une ouverture. `StartLimitIntervalSec=0` évite le piège classique où systemd
+  renonce après cinq échecs rapprochés et laisse l'unité morte.
+* **Il survit à une coupure internet.** Deux valeurs injoignables suffisent à
+  conclure que le lien est tombé, au lieu d'en essayer quatre-vingt-huit à
+  vingt secondes pièce. Passé quatre jours sans séance fraîche — le seuil est
+  en jours calendaires, le marché étant fermé les deux tiers du temps —
+  **les entrées sont suspendues et les stops restent surveillés** : une cassure
+  lue sur la clôture de mardi dernier devient un ordre passé à une ouverture
+  qui a déjà eu lieu.
+* **Il n'agit pas sur une horloge fausse.** Le CM4 n'a pas de pile RTC. L'agent
+  attend que le NTP ait répondu avant son premier tick, et traite « l'heure est
+  antérieure aux séances que j'ai déjà » comme une donnée périmée.
+* **Il se signale.** `python -m trader health` répond sur l'horloge, les
+  données et la base, avec un code de sortie exploitable ; la boucle envoie un
+  battement à systemd, qui la relance si elle se fige sans planter.
 
 ---
 
@@ -1051,9 +1098,17 @@ trader/
   engine.py      LE pas de décision — partagé mot pour mot par le live et le backtest
   scheduler.py   quand se réveiller, sur un calendrier troué
   agent.py       boucle live : sync, rattrapage, tick, persistance, programmation
+  health.py      horloge, fraîcheur des données, intégrité — ce qui autorise ou
+                 non une entrée quand la carte ne voit plus le marché
+  notify.py      systemd : prêt, état, battement de chien de garde (stdlib seule)
   backtest.py    rejeu + métriques + mesures de concentration + deux benchmarks
   report.py      status, watchlist, journal
   cli.py         interface en ligne de commande
+
+deploy/
+  install.sh     installe le tout sur un Raspberry Pi, en une commande
+  *.service      unités systemd : l'agent, l'instantané quotidien
+  README.md      héberger sur un CM4 : ce qui tombe, et ce qui se passe alors
 ```
 
 Trois invariants portent le reste :

@@ -9,10 +9,11 @@ database.
 from __future__ import annotations
 
 import time as clock
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from . import data as market
 from . import events as calendar
+from . import health, notify
 from . import news as newsfeed
 from .config import Settings
 from .engine import Engine, StepResult, SymbolView, market_stats
@@ -31,10 +32,17 @@ K_NEXT_RUN = "next_run"
 K_HALTED = "halted"
 K_PLAN = "plan"
 K_SESSIONS = "sessions_seen"
+K_LAST_TICK = "last_tick"
+K_DEGRADED_SINCE = "degraded_since"
+K_DEGRADED_COUNT = "degraded_count"
 
 
 def sync(
-    store: Store, settings: Settings, bars: int | None = None, log=print
+    store: Store,
+    settings: Settings,
+    bars: int | None = None,
+    log=print,
+    heartbeat=None,
 ) -> dict[str, int]:
     """Refresh the local cache for every symbol, benchmark included.
 
@@ -47,28 +55,56 @@ def sync(
 
     A symbol that fails to fetch is reported and skipped rather than aborting
     the run: eighty tradable names beat none.
+
+    The whole link going down is a different failure and gets a different
+    answer: `Link` notices after the second name times out and the rest give up
+    instantly, so an outage costs one round of timeouts rather than eighty-
+    eight. That matters more than it sounds — a sync that takes half an hour to
+    fetch nothing is an agent permanently busy failing to be online.
+
+    `heartbeat` is called once per name, so a slow sync can keep a watchdog fed
+    without the watchdog having to be slack enough to sleep through a hang.
     """
     counts: dict[str, int] = {}
+    link = market.Link()
     for symbol in settings.data_universe:
+        if heartbeat:
+            heartbeat()
+        counts.setdefault(symbol, 0)
         try:
-            before = {
-                b.open_time: b.close for b in store.load_bars(symbol, settings.interval)
-            }
+            known = {b.open_time: b for b in store.load_bars(symbol, settings.interval)}
             fetched = market.fetch_history(
-                symbol, settings, bars=market.ALL_HISTORY if bars is None else bars
+                symbol,
+                settings,
+                bars=market.ALL_HISTORY if bars is None else bars,
+                link=link,
             )
             restated = sum(
                 1
                 for b in fetched
-                if b.open_time in before
-                and abs(b.close - before[b.open_time]) > 0.005 * max(b.close, 1e-9)
+                if b.open_time in known
+                and abs(b.close - known[b.open_time].close) > 0.005 * max(b.close, 1e-9)
             )
-            counts[symbol] = store.replace_bars(symbol, settings.interval, fetched)
+            counts[symbol] = store.replace_bars(
+                symbol, settings.interval, fetched, known=known
+            )
             if restated:
                 log(f"  ~ {symbol}: {restated} past session(s) restated (split/dividend)")
+        except market.OfflineError as exc:
+            log(f"  ! {symbol}: {exc}")
+            if link.down:
+                # One timeout is a blip and the next name may well work. Two in
+                # a row is the link, and the eighty-six names after it will fail
+                # identically — at twenty seconds each.
+                log(
+                    f"  ! link is down — abandoning this sync after "
+                    f"{len(counts)}/{len(settings.data_universe)} name(s)"
+                )
+                break
         except market.DataError as exc:
             log(f"  ! {symbol}: {exc}")
-            counts[symbol] = 0
+    for symbol in settings.data_universe:
+        counts.setdefault(symbol, 0)
     return counts
 
 
@@ -96,7 +132,11 @@ def pending_steps(
     analyses: dict[str, object] = {}
     index_of: dict[str, dict[int, int]] = {}
     for symbol in settings.data_universe:
-        bars = store.load_bars(symbol, settings.interval)
+        # Bounded on purpose: a live tick needs the warm-up plus what it slept
+        # through, and nothing older can change a number it computes today.
+        # Reading all thirty-six years for every name is what makes this loop
+        # the memory high-water mark of the whole process.
+        bars = store.load_bars(symbol, settings.interval, limit=settings.live_window)
         if len(bars) < settings.warmup_bars:
             continue
         analyses[symbol] = analyze(bars, settings)
@@ -145,22 +185,63 @@ def _roll_day(store: Store, now: datetime, equity: float) -> float:
     return store.get_state(K_DAY_START_EQUITY, equity)
 
 
+RETRY_BACKOFF = (300, 600, 1_200, 2_400, 3_600)
+"""How long to wait before trying again after a tick that could not see the
+market, in seconds: 5 minutes, then 10, 20, 40, and an hour from then on.
+
+A fixed short retry would hammer a router that is down for a day; a fixed long
+one would leave the agent blind for an hour after a thirty-second blip. The
+ceiling is an hour because the agent only ever needs to be online once a day,
+shortly after a closing bell, and an hour of margin against a bell is plenty."""
+
+
+def retry_delay(consecutive: int) -> int:
+    return RETRY_BACKOFF[min(max(consecutive, 1), len(RETRY_BACKOFF)) - 1]
+
+
+def _schedule(store: Store, when: datetime) -> None:
+    store.set_state(K_NEXT_RUN, when.isoformat())
+
+
+def _degrade(store: Store, now: datetime) -> int:
+    """Record that this tick could not see a current market, and say how many
+    in a row that is."""
+    tries = int(store.get_state(K_DEGRADED_COUNT, 0) or 0) + 1
+    store.set_state(K_DEGRADED_COUNT, tries)
+    if not store.get_state(K_DEGRADED_SINCE):
+        store.set_state(K_DEGRADED_SINCE, now.isoformat())
+    return tries
+
+
+def _recover(store: Store) -> None:
+    store.set_state(K_DEGRADED_COUNT, 0)
+    store.set_state(K_DEGRADED_SINCE, "")
+
+
 def run_tick(
     store: Store,
     settings: Settings,
     now: datetime | None = None,
     do_sync: bool = True,
     log=print,
+    heartbeat=None,
 ) -> StepResult:
     now = now or datetime.now(timezone.utc)
     ts = int(now.timestamp() * 1000)
 
     if do_sync:
-        sync(store, settings, log=log)
-        if settings.earnings_mode != "off":
+        prices = sync(store, settings, log=log, heartbeat=heartbeat)
+        # Both of these are optional feeds and both are one request per name.
+        # With the link down they would each repeat the half-hour of timeouts
+        # the price sync just established was pointless, so they are asked only
+        # when something actually came back.
+        online = any(prices.values())
+        if not online:
+            log("  skipping the earnings and headline feeds — nothing is reachable")
+        if online and settings.earnings_mode != "off":
             fresh = sum(calendar.sync(store, settings, log=log).values())
             log(f"  {fresh} new earnings date(s) cached")
-        if settings.news_enabled:
+        if online and settings.news_enabled:
             # Collected and archived. Not consulted: no rule in this agent
             # reads a headline. See `news.py`.
             fresh = sum(newsfeed.sync(store, settings, log=log).values())
@@ -169,7 +250,18 @@ def run_tick(
     steps = pending_steps(store, settings)
     if not steps:
         log("no symbol has enough history yet — run `sync` first")
+        # A cold start with no link lands here. Come back in minutes rather
+        # than leaving `next_run` unset, which would spin the run loop.
+        _schedule(store, now + timedelta(seconds=retry_delay(_degrade(store, now))))
         return StepResult(ts=ts, equity=0.0)
+
+    # Can the agent see a current market at all? Cached sessions look exactly
+    # the same whether the link is up or the router died last Tuesday, and a
+    # breakout read off last Tuesday's close becomes an order queued for an
+    # open that has already happened. Exits are deliberately still supervised:
+    # a stop is a promise made at entry, and the last known close is the honest
+    # thing to measure it against.
+    stale, age = health.is_stale(store, settings, now)
 
     cash = store.get_state(K_CASH, settings.initial_capital)
     portfolio = Portfolio(settings, cash=cash, positions=store.load_positions())
@@ -202,6 +294,13 @@ def run_tick(
 
     if len(steps) > 1:
         log(f"  catching up on {len(steps) - 1} session(s) closed while asleep")
+    if stale:
+        since = store.get_state(K_DEGRADED_SINCE) or now.isoformat()
+        why = (
+            f"data {health._human(age)} old" if age is not None else "cache empty"
+        ) + f" (limit {health._human(health.max_data_age(settings))}), degraded since {since}"
+        log(f"  ! no current market — entries suspended, stops still supervised: {why}")
+        store.save_decision(Decision(ts, "-", "HOLD", f"entries suspended: {why}", 0.0))
 
     result = StepResult(ts=ts, equity=equity_before)
     for position, (bar_ts, bar_views) in enumerate(steps):
@@ -212,7 +311,9 @@ def run_tick(
         # Only the final session can be decided on: the agent is awake now, not
         # then. Whether it decides at all is the cadence, counted in sessions
         # so that a live run and a backtest land on the same ones.
-        decide = live and (seen - 1) % settings.decide_every_n_sessions == 0
+        decide = (
+            live and not stale and (seen - 1) % settings.decide_every_n_sessions == 0
+        )
         stepped = engine.step(
             bar_views,
             ts if live else bar_ts,
@@ -225,7 +326,7 @@ def run_tick(
         result.trades += stepped.trades
         result.orders = stepped.orders
         result.equity = stepped.equity
-        if not decide and live:
+        if not decide and live and not stale:
             log(
                 f"  not a decision session ({seen} seen, decides every"
                 f" {settings.decide_every_n_sessions}) — stops and resting"
@@ -270,14 +371,25 @@ def run_tick(
         near,
         settings,
     )
+    upcoming = plan.next_run
+    if stale:
+        # Blind, so come back sooner than the cadence would — but never later
+        # than the next closing bell, which stays the deadline whatever the
+        # link is doing.
+        upcoming = min(
+            upcoming, now + timedelta(seconds=retry_delay(_degrade(store, now)))
+        )
+    else:
+        _recover(store)
     store.set_state(K_PLAN, {"decide_every": plan.decide_every, "reason": plan.reason})
-    store.set_state(K_NEXT_RUN, plan.next_run.isoformat())
+    store.set_state(K_LAST_TICK, now.isoformat())
+    _schedule(store, upcoming)
 
     log(
         f"[{now:%Y-%m-%d %H:%M UTC}] equity {result.equity:,.2f} "
         f"{settings.quote} | cash {portfolio.cash:,.2f} | "
         f"{len(portfolio.positions)} open | {len(engine.pending)} queued for the "
-        f"open | next {plan.next_run:%Y-%m-%d %H:%M %Z}"
+        f"open | next {upcoming:%Y-%m-%d %H:%M %Z}"
     )
     for d in result.decisions:
         if d.action != "HOLD":
@@ -291,17 +403,94 @@ def run_tick(
     return result
 
 
+CLOCK_WAIT_SECONDS = 600
+"""How long to wait at startup for the clock to be set before giving up on it.
+
+A Compute Module has no battery-backed clock. Power it up and it believes it is
+whenever it last shut down, until NTP answers — which, after a power cut that
+also took the router down, can be minutes. The whole schedule here is "the next
+weekday closing bell, exchange-local", so ticking before then writes a next
+wake-up in the past and prices sessions against a date that has not happened.
+
+The wait is bounded rather than indefinite: a board with no internet at all
+would otherwise never start, and an agent that is up and refusing to enter is
+strictly more useful than one that is not up. Past the timeout it runs anyway,
+and the staleness gate keeps it from acting on what it cannot verify."""
+
+
+def await_clock(
+    store: Store,
+    settings: Settings,
+    log=print,
+    heartbeat=None,
+    sleep=clock.sleep,
+    timeout: float = CLOCK_WAIT_SECONDS,
+) -> bool:
+    """Block until the wall clock is believable, or until `timeout`."""
+    ok, note = health.clock_is_sane(store, settings)
+    if ok:
+        return True
+    log(f"  waiting for the clock to be set — {note}")
+    waited = 0.0
+    while waited < timeout:
+        if heartbeat:
+            heartbeat()
+        sleep(min(5.0, timeout - waited))
+        waited += 5.0
+        ok, note = health.clock_is_sane(store, settings)
+        if ok:
+            log(f"  clock set after {waited:.0f}s — {note}")
+            return True
+    log(f"  ! clock still unset after {timeout:.0f}s ({note}) — running without entries")
+    return False
+
+
+def _status_line(store: Store, settings: Settings) -> str:
+    """One line for `systemctl status`, on a board with no screen."""
+    try:
+        state = health.check(store, settings)
+    except Exception as exc:  # status is a nicety; never let it end the run
+        return f"status unavailable: {type(exc).__name__}"
+    bits = [
+        "next " + (f"{state.next_run:%a %H:%M %Z}" if state.next_run else "unplanned"),
+        f"{state.positions} open",
+    ]
+    if state.orders:
+        bits.append(f"{state.orders} queued")
+    if state.age is not None:
+        bits.append(f"data {health._human(state.age)} old")
+    if state.degraded_since:
+        bits.append(f"DEGRADED since {state.degraded_since:%Y-%m-%d %H:%M UTC}")
+    return " | ".join(bits)
+
+
 def run_forever(store: Store, settings: Settings, log=print) -> None:
     """Sleep until the next closing bell, tick, repeat.
 
-    Long sleeps are broken into short naps so a Ctrl-C lands promptly and a
-    laptop resuming from suspend catches up rather than oversleeping.
+    Long sleeps are broken into short naps so a Ctrl-C lands promptly, a laptop
+    resuming from suspend catches up rather than oversleeping, and — the reason
+    the nap length is no longer a constant — a systemd watchdog gets fed often
+    enough to tell a sleeping agent apart from a wedged one.
     """
     log("agent started — paper trading only, no real orders will ever be sent")
+
+    every = notify.watchdog_interval()
+    nap = min(60.0, every) if every else 60.0
+    ping = notify.watchdog if every else (lambda: False)
+
+    # Sent before the first tick, not after: a cold start downloads thirty-six
+    # years for eighty-eight names, and a `Type=notify` unit that stays quiet
+    # that long is killed on TimeoutStartSec having done nothing wrong.
+    notify.ready("starting")
+    await_clock(store, settings, log=log, heartbeat=ping)
+
+    failures = 0
     while True:
         try:
-            run_tick(store, settings, log=log)
+            run_tick(store, settings, log=log, heartbeat=ping)
+            failures = 0
         except Exception as exc:  # a bad tick must not kill a long-running agent
+            failures += 1
             log(f"  ! tick failed: {type(exc).__name__}: {exc}")
             store.save_decision(
                 Decision(
@@ -312,6 +501,17 @@ def run_forever(store: Store, settings: Settings, log=print) -> None:
                     0.0,
                 )
             )
+            # The schedule is written at the end of a tick, so a tick that
+            # raised has left `next_run` in the past — and a wake-up time in
+            # the past is a busy loop, which on a failure caused by the network
+            # means hammering it. Back off explicitly instead.
+            _schedule(
+                store,
+                datetime.now(timezone.utc) + timedelta(seconds=retry_delay(failures)),
+            )
+
+        ping()
+        notify.status(_status_line(store, settings))
 
         target = store.get_state(K_NEXT_RUN)
         wake = datetime.fromisoformat(target) if target else datetime.now(timezone.utc)
@@ -319,4 +519,5 @@ def run_forever(store: Store, settings: Settings, log=print) -> None:
             remaining = (wake - datetime.now(timezone.utc)).total_seconds()
             if remaining <= 0:
                 break
-            clock.sleep(min(remaining, 60))
+            clock.sleep(min(remaining, nap))
+            ping()
