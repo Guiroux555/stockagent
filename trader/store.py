@@ -122,6 +122,16 @@ CREATE TABLE IF NOT EXISTS state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS runs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_ts INTEGER NOT NULL,
+    ended_ts   INTEGER,
+    initial    REAL NOT NULL,
+    final      REAL,
+    trades     INTEGER NOT NULL DEFAULT 0,
+    note       TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -672,6 +682,24 @@ class Store:
         ).fetchall()
         return [(r["ts"], r["equity"]) for r in rows]
 
+    def first_equity(self) -> tuple[int, float] | None:
+        """The oldest point of the equity curve, without reading the rest.
+
+        Used to back-date a run on an account that has been trading since
+        before the ledger existed: the record has to start where the data
+        starts, not where the upgrade happened.
+        """
+        row = self.conn.execute(
+            "SELECT ts, equity FROM equity_curve ORDER BY ts LIMIT 1"
+        ).fetchone()
+        return (row["ts"], row["equity"]) if row else None
+
+    def last_equity(self) -> tuple[int, float] | None:
+        row = self.conn.execute(
+            "SELECT ts, equity FROM equity_curve ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+        return (row["ts"], row["equity"]) if row else None
+
     def get_state(self, key: str, default=None):
         row = self.conn.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
         return json.loads(row["value"]) if row else default
@@ -683,8 +711,91 @@ class Store:
         )
         self.conn.commit()
 
+
+    # --- the track record -------------------------------------------------
+    #
+    # A forward test is only worth something if it cannot be quietly restarted
+    # when it looks bad. This table is the ledger that makes that visible: one
+    # row per funded run, closed rather than deleted when the account is reset,
+    # and deliberately left out of `reset_trading_state`. An agent with four
+    # abandoned runs behind it and one flattering one in progress is a very
+    # different claim from an agent with one run, and the difference should not
+    # depend on anyone remembering to mention it.
+
+    def open_run(self, ts: int, initial: float, note: str = "") -> int:
+        cur = self.conn.execute(
+            "INSERT INTO runs (started_ts, initial, note) VALUES (?,?,?)",
+            (ts, initial, note),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def current_run(self) -> dict | None:
+        """The run in progress: the one that was funded and never closed."""
+        row = self.conn.execute(
+            "SELECT * FROM runs WHERE ended_ts IS NULL ORDER BY started_ts DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def close_run(self, ts: int, final: float, trades: int, note: str | None = None) -> None:
+        run = self.current_run()
+        if run is None:
+            return
+        if note is None:
+            self.conn.execute(
+                "UPDATE runs SET ended_ts=?, final=?, trades=? WHERE id=?",
+                (ts, final, trades, run["id"]),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE runs SET ended_ts=?, final=?, trades=?, note=? WHERE id=?",
+                (ts, final, trades, note, run["id"]),
+            )
+        self.conn.commit()
+
+    def drop_empty_run(self) -> bool:
+        """Delete the run in progress, but only if nothing ever happened in it.
+
+        Changing your mind about the budget before the agent has taken a single
+        decision is not a restart, and recording it as one would fill the
+        ledger with 0% rows that hide the ones that matter. This is the only
+        place a run is ever deleted, and it guards itself: a run with a trade
+        or a single point of equity curve behind it cannot be dropped here.
+        """
+        run = self.current_run()
+        if run is None:
+            return False
+        if self.first_equity() is not None:
+            return False
+        if self.conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]:
+            return False
+        self.conn.execute("DELETE FROM runs WHERE id=?", (run["id"],))
+        self.conn.commit()
+        return True
+
+    def runs(self) -> list[dict]:
+        rows = self.conn.execute("SELECT * FROM runs ORDER BY started_ts").fetchall()
+        return [dict(r) for r in rows]
+
     def reset_trading_state(self) -> None:
-        """Wipe the account, positions and history but keep the cached bars."""
+        """Wipe the account, positions and history but keep the cached bars.
+
+        The run in progress is *closed*, not deleted, and `runs` is not on the
+        wipe list. Wiping the account is a legitimate thing to do; doing it
+        silently and then quoting the fresh start as a track record is not, and
+        the difference is one row.
+        """
+
+        last = self.last_equity()
+        if self.current_run() is not None:
+            count = self.conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+            self.close_run(
+                last[0] if last else 0,
+                last[1] if last else 0.0,
+                int(count),
+                note="wiped by hand",
+            )
+
         # The news archive and the earnings calendar are deliberately not in
         # this list: they record what was public when, they are not part of the
         # account, and the archive cannot be rebuilt once discarded.

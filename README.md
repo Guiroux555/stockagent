@@ -43,6 +43,8 @@ python -m trader news --sync         # collecte et archive les titres de presse
 python -m trader events --sync       # calendrier de résultats, depuis SEC EDGAR
 python -m trader events --gaps       # les gaps d'ouverture les jours de résultats
 python -m trader log -n 30           # journal des décisions, HOLD compris
+python -m trader fund 100000         # dote le portefeuille virtuel, et lance le chrono
+python -m trader track               # est-ce que ça gagne de l'argent ? est-ce lisible ?
 python -m trader health              # horloge, fraîcheur des données, intégrité de la base
 python -m trader backup              # instantané daté de la base, sept conservés
 python -m trader reset               # remet le compte à zéro, garde l'historique
@@ -94,6 +96,113 @@ tient en quatre propriétés :
   battement à systemd, qui la relance si elle se fige sans planter.
 
 ---
+
+## Est-ce que ça gagne de l'argent ?
+
+C'est la seule question qui compte, et **le backtest ne peut pas y répondre**.
+Ses paramètres ont été choisis avec le recul, sur les trente-six ans mêmes où
+il est noté ; rien mesuré sur cette période ne peut trancher, puisque c'est là
+que le choix a eu lieu. Seul un run vers l'avant, sur des séances qui n'avaient
+pas eu lieu quand les paramètres ont été fixés, peut trancher. C'est ce que
+fait la carte dans le placard, et `track` est ce qui le mesure.
+
+```bash
+python -m trader fund 100000   # dote le compte virtuel — le chrono démarre ici
+python -m trader track         # ce qu'il a fait depuis, et ce que ça vaut
+```
+
+Le budget est en dizaines de milliers plutôt qu'en milliers pour une raison
+mécanique : les actions s'achètent par titres entiers. Avec 1 000 USD et
+`max_concurrent` positions, la moitié des candidats sont refusés par
+`min_notional` et l'agent mesuré n'est plus celui qui a été backtesté. La
+comparaison entre les deux agents se fait en pourcentage, pas en valeur
+absolue — et `deploy/portfolio.py` s'en charge.
+
+### Les six conditions
+
+`track` ne rend pas un verdict, il coche une liste. L'information utile, c'est
+*laquelle* manque encore :
+
+```
+  Before 'it works' is sayable, all six of these:
+   [x] ran long enough              1.92 of 1 year(s)
+   [ ] enough positions             15 of 30
+   [x] made money                   +3.85%
+   [ ] beat Buy & hold SPY          -28.57%
+   [x] t on the equity curve        3.23 of 2.0
+   [x] t per position (naive)      17.19 of 2.0
+```
+
+**Pour cet agent-ci, la condition qui coince n'est pas le `t`.** Le backtest
+hors échantillon est sans ambiguïté : sur les quinze dernières années, que le
+réglage n'a pas vues, l'agent fait 8,1 % par an pendant que SPY en fait 14,9 %.
+Il garde un meilleur rapport rendement/drawdown, et c'est tout ce qu'il garde.
+Un run vers l'avant qui gagne de l'argent tout en restant sous l'indice a
+répondu « oui » à « est-ce que ça gagne ? » et « non » à la question qu'il faut
+vraiment poser. La ligne `beat Buy & hold SPY` est là pour que ce « non » ne
+puisse pas être oublié.
+
+Deux `t` plutôt qu'un, parce qu'ils échouent pour des raisons différentes :
+celui de la courbe attrape un mauvais trimestre, celui des positions attrape
+une mauvaise série de trades. Et une durée minimale par-dessus, parce qu'un
+Sharpe estimé sur deux mois porte une erreur type énorme et que les rendements
+d'une position ouverte sont la même tendance échantillonnée plusieurs fois —
+les deux gonflent le `t`.
+
+### Combien de temps, vraiment
+
+Le `t` d'une courbe grandit comme la racine du temps : `t ≈ Sharpe × √années`.
+Donc, pour franchir la barre habituelle de 2 :
+
+| Sharpe | Durée nécessaire |
+|---|---|
+| 0,5 | 16 ans |
+| 1,0 | **4 ans** |
+| 1,5 | 1,8 an |
+| 2,0 | 1 an |
+
+**Comptez en années, pas en mois** — et notez que diviser le Sharpe par deux
+quadruple l'attente. `track` affiche une date estimée quand c'est le `t` qui
+manque ; son rôle est d'être décourageante, et elle ne vaut qu'un ordre de
+grandeur.
+
+### Le registre
+
+Un test vers l'avant ne vaut quelque chose que s'il ne peut pas être relancé en
+douce quand il devient gênant. Chaque dotation ouvre un *run*, et un run est
+**clôturé, jamais supprimé** :
+
+```
+  THE LEDGER  (every funded run, so a restart cannot be quiet)
+   #1  2026-06-01 -> 2026-09-20   100,000.00 ->   91,240.00  (-8.8%, 14 exits)  wiped by hand
+   #2  2026-09-20 -> now          100,000.00 ->  104,310.00  (+4.3%, 7 exits)   IN PROGRESS
+```
+
+Un agent avec quatre runs abandonnés derrière lui et un run flatteur en cours,
+ce n'est pas la même affirmation qu'un agent avec un seul run — et la
+différence ne devrait pas dépendre de qui pense à le mentionner. `fund` refuse
+de redoter un compte qui a déjà tradé ; il faut `--restart`, et l'ancien run
+reste imprimé.
+
+### Les deux agents ensemble
+
+`deploy/portfolio.py` lit les deux bases en lecture seule et additionne les
+comptes jour par jour, à partir du jour où le second a démarré :
+
+```bash
+python3 /opt/stockagent/deploy/portfolio.py \
+    /var/lib/stockagent/live.db /var/lib/cryptoagent/live.db
+```
+
+Il dit aussi ce qu'il ne peut pas dire : deux agents ne sont pas deux paris
+indépendants sur la même question — actions américaines et crypto corrèlent
+précisément les semaines où ça compte — et il n'y a pas de benchmark dans cette
+vue, « battre l'indice » se demande agent par agent.
+
+> **Rappel.** Tout ceci est virtuel. Il n'existe dans ce dépôt aucune clé de
+> courtier, aucun code de signature, aucun appel vers un endpoint d'exécution :
+> le « budget » est un nombre dans une base SQLite, et il ne peut pas en sortir.
+
 
 ## Ce qui change quand on passe de la crypto aux actions
 
@@ -1101,6 +1210,8 @@ trader/
   health.py      horloge, fraîcheur des données, intégrité — ce qui autorise ou
                  non une entrée quand la carte ne voit plus le marché
   notify.py      systemd : prêt, état, battement de chien de garde (stdlib seule)
+  track.py       le compte vers l'avant : ce que le live a fait depuis sa
+                 dotation, et les six conditions avant de pouvoir en conclure
   backtest.py    rejeu + métriques + mesures de concentration + deux benchmarks
   report.py      status, watchlist, journal
   cli.py         interface en ligne de commande
@@ -1108,6 +1219,7 @@ trader/
 deploy/
   install.sh     installe le tout sur un Raspberry Pi, en une commande
   *.service      unités systemd : l'agent, l'instantané quotidien
+  portfolio.py   les deux agents comme un seul portefeuille virtuel
   README.md      héberger sur un CM4 : ce qui tombe, et ce qui se passe alors
 ```
 

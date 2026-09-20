@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import data as market
 from . import events as calendar
-from . import health, notify
+from . import health, notify, track
 from . import news as newsfeed
 from .config import Settings
 from .engine import Engine, StepResult, SymbolView, market_stats
@@ -269,6 +269,10 @@ def run_tick(
     prices = {s: v.analysis.closes[v.index] for s, v in views.items()}
 
     equity_before = portfolio.equity(prices)
+    # Pre-register the run on the first tick, so the forward record starts
+    # where the account starts rather than wherever someone later decides to
+    # measure from. See `track.py`.
+    track.ensure_run(store, settings, ts, equity_before)
     day_start = _roll_day(store, now, equity_before)
     peak = max(store.get_state(K_PEAK_EQUITY, settings.initial_capital), equity_before)
     seen = int(store.get_state(K_SESSIONS, 0))

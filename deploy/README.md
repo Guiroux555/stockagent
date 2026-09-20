@@ -153,7 +153,40 @@ de passer un ordre réel.
 
 ---
 
-## 5. Les deux agents sur la même carte
+## 5. Est-ce que ça gagne de l'argent ?
+
+C'est la raison d'être de la carte, et la réponse se lit avec deux commandes.
+
+```bash
+stock track      # le compte de cet agent : six conditions, cochées ou non
+sudo python3 /opt/stockagent/deploy/portfolio.py \
+     /var/lib/stockagent/live.db /var/lib/cryptoagent/live.db
+```
+
+Le service dote le compte tout seul au premier tick, avec le capital de la
+configuration, et écrit la date de départ dans la base. Pour choisir un autre
+budget, faites-le **avant** de démarrer le service :
+
+```bash
+sudo systemctl stop stockagent
+sudo -u stockagent /opt/stockagent/.venv/bin/python -m trader \
+     --db /var/lib/stockagent/live.db fund 100000
+sudo systemctl start stockagent
+```
+
+Après, `fund` refuse : redoter un compte qui a déjà tradé déplacerait la ligne
+de départ de la mesure, et c'est la seule chose qu'un test vers l'avant ne
+survit pas. `--restart` force le passage, et l'ancien run reste au registre.
+
+**Le rythme de consultation compte.** Un `track` par semaine est déjà plus
+souvent que nécessaire : la barre statistique se franchit en années, pas en
+mois, et regarder tous les jours une courbe qui a besoin de quatre ans est le
+meilleur moyen de la couper au premier mauvais trimestre. Le README principal
+a le tableau des durées.
+
+---
+
+## 6. Les deux agents sur la même carte
 
 `stockagent` et `cryptoagent` s'installent exactement pareil et ne se
 connaissent pas : deux utilisateurs système, deux répertoires d'état, deux
@@ -186,7 +219,7 @@ systemd-analyze security stockagent.service
 
 ---
 
-## 6. Sauvegardes et restauration
+## 7. Sauvegardes et restauration
 
 Un instantané par jour, sept conservés, dans `/var/lib/stockagent/backups/`.
 Pris avec l'API de sauvegarde de SQLite et non avec `cp`, parce que l'agent
@@ -214,7 +247,7 @@ rsync -a pi@cm4:/var/lib/stockagent/backups/ ~/sauvegardes/stockagent/
 
 ---
 
-## 7. Mettre à jour
+## 8. Mettre à jour
 
 ```bash
 cd ~/stockagent && git pull
@@ -239,7 +272,7 @@ sudo systemctl start stockagent
 
 ---
 
-## 8. Quand ça ne démarre pas
+## 9. Quand ça ne démarre pas
 
 ```bash
 systemctl status stockagent -l --no-pager

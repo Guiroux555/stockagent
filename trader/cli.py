@@ -10,6 +10,8 @@ python -m trader news              the headline archive, and what it is worth
 python -m trader events            the earnings calendar, its coverage and its gaps
 python -m trader watch             what the strategy sees right now
 python -m trader log               recent decisions, including the HOLDs
+python -m trader track             the forward record: is it making money yet?
+python -m trader fund              set the virtual budget and pre-register the run
 python -m trader health            clock, data, database — exits non-zero if sick
 python -m trader backup            snapshot the database, keeping the last N
 python -m trader reset             wipe the account, keep the price history
@@ -23,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import health as health_report
+from . import track as track_report
 from .agent import run_forever, run_tick, sync
 from .backtest import run_backtest
 from .config import DEFAULT_DB, Settings
@@ -120,6 +123,30 @@ def _parser() -> argparse.ArgumentParser:
         "--gaps",
         action="store_true",
         help="compare opening gaps on earnings sessions with every other session",
+    )
+
+    tr = sub.add_parser(
+        "track",
+        help="the forward record since the account was funded, and whether it "
+        "means anything yet",
+    )
+    tr.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="machine-readable, for deploy/portfolio.py across several agents",
+    )
+
+    fd = sub.add_parser(
+        "fund",
+        help="set the virtual budget and pre-register the run that measures it",
+    )
+    fd.add_argument("amount", type=float, help="virtual capital, in the quote currency")
+    fd.add_argument(
+        "--restart",
+        action="store_true",
+        help="close the run in progress and start a new one; the old run stays "
+        "in the ledger and `track` keeps printing it",
     )
 
     sub.add_parser(
@@ -250,6 +277,22 @@ def main(argv: list[str] | None = None) -> int:
             print(decision_log(store, args.n))
             return 0
 
+        if args.command == "track":
+            if args.as_json:
+                import json as _json
+
+                print(
+                    _json.dumps(
+                        track_report.record(store, settings).to_dict(), indent=2
+                    )
+                )
+            else:
+                print(track_report.report_text(store, settings))
+            return 0
+
+        if args.command == "fund":
+            return _fund(store, settings, args)
+
         if args.command == "health":
             state = health_report.check(store, settings)
             print(state.report())
@@ -271,6 +314,58 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     return 1
+
+
+def _fund(store: Store, settings: Settings, args) -> int:
+    """Give the paper account a virtual budget, and write down when.
+
+    Refusing to re-fund an account that has already traded is the whole point.
+    A forward test whose starting line moves is not a forward test, so a
+    restart has to be asked for explicitly — and even then the run it replaces
+    stays in the ledger and `track` keeps printing it.
+    """
+    from .agent import K_CASH, K_DAY_START_EQUITY, K_PEAK_EQUITY
+
+    if args.amount <= 0:
+        print("a budget has to be positive")
+        return 1
+
+    now = datetime.now(timezone.utc)
+    ts = int(now.timestamp() * 1000)
+    traded = bool(store.load_trades() or store.load_positions() or store.load_orders())
+    run = store.current_run()
+
+    if traded and not args.restart:
+        print(
+            "this account has already traded. Re-funding it would move the "
+            "starting line of the measurement,\nwhich is the one thing a "
+            "forward test cannot survive.\n\n"
+            "  python -m trader track              see what it has done so far\n"
+            "  python -m trader fund --restart N   start again, keeping the old "
+            "run in the ledger"
+        )
+        return 1
+
+    if run is not None and not store.drop_empty_run():
+        last = store.last_equity()
+        store.close_run(
+            last[0] if last else ts,
+            last[1] if last else float(run["initial"]),
+            len(store.load_trades()),
+            note="restarted",
+        )
+    if traded:
+        store.reset_trading_state()
+
+    store.set_state(K_CASH, args.amount)
+    store.set_state(K_PEAK_EQUITY, args.amount)
+    store.set_state(K_DAY_START_EQUITY, args.amount)
+    store.open_run(ts, args.amount)
+
+    print(BANNER)
+    print(f"  funded with {args.amount:,.2f} {settings.quote}, {now:%Y-%m-%d %H:%M UTC}")
+    print("  the clock on the measurement starts now — `python -m trader track`")
+    return 0
 
 
 def _backup(store: Store, args) -> int:

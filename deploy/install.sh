@@ -175,6 +175,10 @@ cat <<EOF
   check      systemctl status ${AGENT}
   health     sudo -u ${AGENT} ${PREFIX}/.venv/bin/python -m trader \\
                --db ${STATE}/live.db health
+  record     ... the same, with 'track' instead of 'health': what the paper
+             account has made since it was funded, and how far that is from
+             meaning anything. Read it monthly, not daily — the statistical
+             bar is cleared in years.
 
   It is paper trading. There are no credentials anywhere in this install and
   no code path that could place a real order.
