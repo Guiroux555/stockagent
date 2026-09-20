@@ -163,3 +163,122 @@ def watchlist(store: Store, settings: Settings) -> str:
             f"ATR {a.atr_pct(i):>6.2%}  {sig.action:<4} {sig.reason}"
         )
     return "\n".join(out + short)
+
+
+def trend_board(store: Store, settings: Settings) -> str:
+    """Short and medium-term trends: by sector first, then by name.
+
+    Sector first because that is the order the correlation measurement says to
+    read it in — names inside a sector move together, so a name's sector is
+    more informative about it than its own last week.
+    """
+    from .engine import SymbolView
+    from .strategy import analyze
+    from .trends import HORIZONS, collect, market
+
+    views: dict[str, SymbolView] = {}
+    for symbol in settings.universe:
+        bars = store.load_bars(symbol, settings.interval)
+        if len(bars) >= settings.warmup_bars:
+            views[symbol] = SymbolView(analyze(bars, settings), len(bars) - 1)
+    if not views:
+        return "not enough cached history — run `python -m trader sync` first"
+
+    trends = collect(views, settings)
+    if not trends:
+        return "no name has enough history for a medium-term reading yet"
+    overall = market(trends, settings)
+    horizons = [name for name, _ in HORIZONS]
+
+    out = [
+        "=" * 92,
+        "  TRENDS   returns per horizon; 'risk' columns are the same return"
+        " divided by the name's ATR%",
+        "=" * 92,
+        f"  Market    {overall.rising} rising, {overall.falling} falling of"
+        f" {len(trends)}   breadth {overall.breadth:.0%} above EMA200,"
+        f" {overall.breadth_short:.0%} up short-term",
+        "",
+        "  BY SECTOR   (equal weight, strongest medium term first)",
+        f"  {'sector':<24}" + "".join(f"{h:>8}" for h in horizons)
+        + f"{'short':>9}{'medium':>9}{'breadth':>9}",
+        "  " + "-" * 88,
+    ]
+    for sector in overall.leaders:
+        cells = "".join(
+            f"{sector.returns.get(h, 0.0):>+8.1%}" for h in horizons
+        )
+        out.append(
+            f"  {sector.name:<24}{cells}"
+            f"{sector.short:>+9.2f}{sector.medium:>+9.2f}{sector.breadth:>9.0%}"
+        )
+
+    out += [
+        "",
+        "  BY NAME   (strongest medium term first, top 20)",
+        f"  {'name':<8}{'sector':<24}" + "".join(f"{h:>8}" for h in horizons)
+        + f"{'medium':>9}{'state':>10}",
+        "  " + "-" * 88,
+    ]
+    of = settings.sector_of
+    ranked = sorted(trends.values(), key=lambda t: -t.medium)
+    for trend in ranked[:20]:
+        cells = "".join(f"{trend.returns.get(h, 0.0):>+8.1%}" for h in horizons)
+        flag = trend.label + ("*" if trend.ema_stack else "")
+        out.append(
+            f"  {trend.symbol:<8}{of.get(trend.symbol, '-'):<24}{cells}"
+            f"{trend.medium:>+9.2f}{flag:>10}"
+        )
+    out.append("")
+    out.append("  * every moving average in the ladder pointing the same way")
+    out.append("=" * 92)
+    return "\n".join(out)
+
+
+def news_board(store: Store, settings: Settings, limit: int = 30) -> str:
+    """The headline archive, most recent first, with what each score is made of.
+
+    Every number here can be traced to the words that produced it. That is the
+    only claim this scoring makes: not that it is good, that it is auditable.
+    """
+    from .models import utc
+
+    items, lo, hi = store.news_span()
+    out = [
+        "=" * 92,
+        "  NEWS ARCHIVE",
+        "=" * 92,
+    ]
+    if not items:
+        out += [
+            "  empty.",
+            "",
+            "  Nothing is wrong. The free sources serve only the last few days,"
+            " so this archive",
+            "  can only be built forwards, one tick at a time. Set"
+            " news_enabled and run the agent;",
+            "  in a year there will be a year of it, timestamped when it was"
+            " seen rather than",
+            "  when it is convenient — which is the only version of this data"
+            " worth replaying.",
+            "=" * 92,
+        ]
+        return "\n".join(out)
+
+    span_days = (hi - lo) / 86_400_000 if hi > lo else 0.0
+    out += [
+        f"  {items:,} headline(s) over {span_days:.0f} day(s)"
+        f"   {utc(lo):%Y-%m-%d} -> {utc(hi):%Y-%m-%d}",
+        "  Archived only — no rule in this agent reads a headline."
+        "  See news.py for why.",
+        "",
+    ]
+    for item in store.load_news(limit=limit):
+        out.append(
+            f"  {utc(item.ts):%Y-%m-%d %H:%M}  {item.symbol:<7}"
+            f"{item.score:>+6.2f}  {item.kind:<9} {item.title[:52]:<52}"
+        )
+        if item.matched:
+            out.append(f"  {'':<17}  {'':<7}{'':>6}  {'':<9} -> {item.matched}")
+    out.append("=" * 92)
+    return "\n".join(out)

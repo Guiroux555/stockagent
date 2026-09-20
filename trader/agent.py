@@ -12,6 +12,7 @@ import time as clock
 from datetime import datetime, timezone
 
 from . import data as market
+from . import news as newsfeed
 from .config import Settings
 from .engine import Engine, StepResult, SymbolView, market_stats
 from .models import Decision
@@ -155,6 +156,11 @@ def run_tick(
 
     if do_sync:
         sync(store, settings, log=log)
+        if settings.news_enabled:
+            # Collected and archived. Not consulted: no rule in this agent
+            # reads a headline. See `news.py`.
+            fresh = sum(newsfeed.sync(store, settings, log=log).values())
+            log(f"  {fresh} new headline(s) archived (not used for decisions)")
 
     steps = pending_steps(store, settings)
     if not steps:

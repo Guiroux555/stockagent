@@ -5,6 +5,8 @@ python -m trader tick              take one decision now
 python -m trader run               run continuously on its own schedule
 python -m trader backtest          replay the cache through the same engine
 python -m trader status            account, positions, resting orders
+python -m trader trends            short and medium-term trends, by sector and name
+python -m trader news              the headline archive, and what it is worth
 python -m trader watch             what the strategy sees right now
 python -m trader log               recent decisions, including the HOLDs
 python -m trader reset             wipe the account, keep the price history
@@ -19,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from .agent import run_forever, run_tick, sync
 from .backtest import run_backtest
 from .config import DEFAULT_DB, Settings
-from .report import decision_log, status, watchlist
+from .report import decision_log, news_board, status, trend_board, watchlist
 from .store import Store
 
 BANNER = (
@@ -77,6 +79,11 @@ def _parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status", help="account summary")
     sub.add_parser("watch", help="current view of each name")
+    sub.add_parser("trends", help="short and medium-term trends, by sector and name")
+
+    n = sub.add_parser("news", help="the headline archive")
+    n.add_argument("--sync", action="store_true", help="fetch headlines first")
+    n.add_argument("-n", type=int, default=30)
 
     lg = sub.add_parser("log", help="recent decisions")
     lg.add_argument("-n", type=int, default=25)
@@ -144,6 +151,19 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "watch":
             print(watchlist(store, settings))
+            return 0
+
+        if args.command == "trends":
+            print(trend_board(store, settings))
+            return 0
+
+        if args.command == "news":
+            if args.sync:
+                from .news import sync as sync_news
+
+                counts = sync_news(store, settings)
+                print(f"  {sum(counts.values())} new headline(s) archived")
+            print(news_board(store, settings, args.n))
             return 0
 
         if args.command == "log":

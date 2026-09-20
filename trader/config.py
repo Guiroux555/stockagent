@@ -61,6 +61,31 @@ class Settings:
     backtest, it cannot be fixed with free data, and it is why the report
     benchmarks against SPY as well as against this basket."""
 
+    sectors: tuple[tuple[str, str], ...] = (
+        ("Information technology", "AAPL MSFT NVDA AVGO ORCL CSCO ADBE CRM AMD"
+                                   " INTC TXN QCOM IBM ACN AMAT"),
+        ("Communication services", "GOOGL META NFLX DIS CMCSA T VZ"),
+        ("Consumer discretionary", "AMZN TSLA HD MCD NKE SBUX LOW BKNG TJX"),
+        ("Consumer staples", "PG KO PEP WMT COST PM MDLZ CL"),
+        ("Health care", "JNJ UNH LLY ABBV MRK PFE TMO ABT DHR AMGN ISRG GILD"),
+        ("Financials", "BRK-B JPM BAC WFC GS MS SPGI BLK AXP C SCHW"),
+        ("Industrials", "CAT BA HON UNP GE RTX LMT DE UPS MMM"),
+        ("Energy", "XOM CVX COP SLB EOG"),
+        ("Utilities", "NEE DUK SO"),
+        ("Materials", "LIN SHW APD NEM"),
+        ("Real estate", "AMT PLD SPG"),
+    )
+    """Which sector each name belongs to.
+
+    Not decoration, and not only documentation: the measured independence of
+    this universe comes entirely from this split. Names inside one sector
+    correlate at 0.467, names across two at 0.324 — and the eleven financials
+    correlate at 0.671, which is exactly the figure the crypto version of this
+    agent measured across its whole universe. A sector is a crypto market.
+
+    It is a tuple of pairs rather than a dict so that `Settings` stays hashable
+    and frozen like everything else here."""
+
     benchmark: str = "SPY"
     """Fetched and analysed like any other symbol, but never traded.
 
@@ -243,6 +268,45 @@ class Settings:
     """Sessions used to measure relative strength. 63 ~ one quarter."""
     rs_vol_normalise: bool = True
 
+    # --- short / medium-term trend gates ----------------------------------
+    min_medium_trend: float = 0.0
+    """Minimum medium-term trend score (3 and 6 month return over ATR%) before
+    a name may be entered; 0 disables the gate.
+
+    The breakout trigger is a one-horizon question. This is the gate that asks
+    the other one — has this been climbing for two quarters, or for two weeks?
+    Off by default until the measurement in the README says otherwise."""
+
+    sector_top_k: int = 0
+    """Only names in the `k` strongest sectors may be entered; 0 disables.
+
+    Worth testing separately from `rs_top_k` even though name-level momentum
+    failed, because the correlation measurement says the sector is the unit
+    that actually decouples: within a sector names correlate at 0.467, across
+    sectors at 0.324. If cross-sectional momentum works anywhere in this
+    universe, it should work here."""
+
+    # --- news -------------------------------------------------------------
+    news_enabled: bool = False
+    """Fetch headlines on every tick and add them to the archive.
+
+    Collection only. **No rule in this agent reads a headline**, and there is
+    no setting that would let one — the wiring does not exist, which is a
+    stronger guarantee than a flag set to zero.
+
+    The reason is measured rather than assumed. Every other rule here is tested
+    against thirty-six years of history; a news rule cannot be, because the
+    free sources serve only the last few days. Turning this on starts building
+    the archive that would make that measurement possible later, and until the
+    measurement exists the headlines stay out of the decision path. See
+    `news.py`."""
+
+    news_per_symbol: int = 10
+    news_max_age_hours: int = 72
+    """How recent a headline has to be to be summarised by the report. Three
+    sessions: long enough to span a weekend, short enough that the market has
+    not already priced it."""
+
     # --- decision cadence -------------------------------------------------
     decide_every_n_sessions: int = 1
     """How often the agent evaluates signals, in sessions. 1 = every close.
@@ -272,6 +336,15 @@ class Settings:
         "https://query1.finance.yahoo.com",
         "https://query2.finance.yahoo.com",
     )
+
+    @property
+    def sector_of(self) -> dict[str, str]:
+        """Symbol -> sector name, for the names that have one."""
+        return {
+            symbol: name
+            for name, members in self.sectors
+            for symbol in members.split()
+        }
 
     @property
     def data_universe(self) -> tuple[str, ...]:

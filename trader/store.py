@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -53,6 +54,21 @@ CREATE TABLE IF NOT EXISTS pending_orders (
     fraction     REAL NOT NULL DEFAULT 1,
     created_ts   INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS news (
+    uid        TEXT NOT NULL,
+    symbol     TEXT NOT NULL,
+    ts         INTEGER NOT NULL,
+    source     TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    link       TEXT NOT NULL DEFAULT '',
+    score      REAL NOT NULL DEFAULT 0,
+    kind       TEXT NOT NULL DEFAULT 'general',
+    matched    TEXT NOT NULL DEFAULT '',
+    first_seen INTEGER NOT NULL,
+    PRIMARY KEY (symbol, uid)
+);
+CREATE INDEX IF NOT EXISTS idx_news_symbol_ts ON news(symbol, ts);
 
 CREATE TABLE IF NOT EXISTS trades (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -304,6 +320,89 @@ class Store:
             for r in rows
         ]
 
+    # --- news archive -----------------------------------------------------
+
+    def save_news(self, items: Iterable) -> int:
+        """Add headlines to the archive, never replacing one already there.
+
+        `INSERT OR IGNORE`, not `OR REPLACE`, and that is the whole point: an
+        item keeps the `first_seen` of the tick that actually saw it. Rewriting
+        it on every sync would turn the archive into a hindsight dataset, which
+        is exactly the thing it exists to avoid being.
+        """
+        now = int(time.time() * 1000)
+        rows = [
+            (
+                i.uid,
+                i.symbol,
+                i.ts,
+                i.source,
+                i.title,
+                i.link,
+                i.score,
+                i.kind,
+                i.matched,
+                now,
+            )
+            for i in items
+        ]
+        if not rows:
+            return 0
+        before = self.conn.total_changes
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO news"
+            " (uid,symbol,ts,source,title,link,score,kind,matched,first_seen)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        self.conn.commit()
+        return self.conn.total_changes - before
+
+    def load_news(
+        self, symbol: str | None = None, since: int | None = None, limit: int = 200
+    ) -> list:
+        from .news import NewsItem
+
+        sql = "SELECT * FROM news"
+        where: list[str] = []
+        args: list = []
+        if symbol:
+            where.append("symbol=?")
+            args.append(symbol)
+        if since is not None:
+            where.append("ts>=?")
+            args.append(since)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        args.append(limit)
+        return [
+            NewsItem(
+                symbol=r["symbol"],
+                uid=r["uid"],
+                ts=r["ts"],
+                source=r["source"],
+                title=r["title"],
+                link=r["link"],
+                score=r["score"],
+                kind=r["kind"],
+                matched=r["matched"],
+            )
+            for r in self.conn.execute(sql, args).fetchall()
+        ]
+
+    def news_span(self) -> tuple[int, int, int]:
+        """How much archive there is: (items, earliest ts, latest ts).
+
+        Printed by the status report, because the only thing that makes this
+        archive worth anything is its length, and the only way it gets longer
+        is time.
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n, MIN(ts) AS lo, MAX(ts) AS hi FROM news"
+        ).fetchone()
+        return int(row["n"] or 0), int(row["lo"] or 0), int(row["hi"] or 0)
+
     # --- trades & decisions -----------------------------------------------
 
     def save_trade(self, t: Trade) -> None:
@@ -406,6 +505,9 @@ class Store:
 
     def reset_trading_state(self) -> None:
         """Wipe the account, positions and history but keep the cached bars."""
+        # The news archive is deliberately not in this list: it is a record of
+        # what was public when, it is not part of the account, and it cannot be
+        # rebuilt once discarded.
         for table in (
             "positions",
             "pending_orders",

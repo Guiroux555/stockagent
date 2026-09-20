@@ -38,6 +38,8 @@ python -m trader tick                # prend une décision maintenant
 python -m trader run                 # tourne en continu, une décision par séance
 python -m trader status              # compte, positions, ordres en attente
 python -m trader watch               # ce que la stratégie voit, valeur par valeur
+python -m trader trends              # tendances court et moyen terme, par secteur et par valeur
+python -m trader news --sync         # collecte et archive les titres de presse
 python -m trader log -n 30           # journal des décisions, HOLD compris
 python -m trader reset               # remet le compte à zéro, garde l'historique
 ```
@@ -551,6 +553,157 @@ budget de risque de 9 USD face à une action à 500 USD ne peut tout simplement
 pas exprimer une petite position. `whole_shares = false` rend le
 dimensionnement continu si votre courtier le permet.
 
+
+---
+
+## Les tendances court et moyen terme
+
+Le déclencheur de la stratégie pose une question, sur un horizon : la clôture
+est-elle au-dessus du plus-haut des vingt dernières séances ? C'est un bon
+déclencheur et une mauvaise description. Il ne dit pas si la valeur grimpe
+depuis six mois ou depuis six jours, si son secteur mène ou saigne, ni si le
+marché s'élargit ou se resserre — et ce sont les premières questions qu'un
+humain devant le même écran poserait.
+
+`trends.py` y répond, sur une échelle d'horizons :
+
+| | 1 semaine | 1 mois | 3 mois | 6 mois | 12 mois |
+|---|---|---|---|---|---|
+| séances | 5 | 21 | 63 | 126 | 252 |
+| | ce qui vient de se passer | court terme | moyen terme | moyen terme confirmé | contexte |
+
+Chaque horizon est rapporté brut **et** divisé par l'ATR% de la valeur. La
+normalisation compte plus qu'il n'y paraît : sans elle, un classement de
+tendances est un classement de volatilité, et la valeur la plus large de
+l'univers mène chaque hausse et chaque baisse. Divisée par l'ATR%, la question
+devient « combien de terrain couvert par unité de risque porté ».
+
+```bash
+python -m trader trends
+```
+
+```
+  Market    17 rising, 25 falling of 87   breadth 57% above EMA200, 23% up short-term
+
+  BY SECTOR   (equal weight, strongest medium term first)
+  sector                        1w      1m      3m      6m     12m    short   medium  breadth
+  Health care                +3.1%   -2.8%  +16.1%  +15.9%  +29.5%    +0.05    +7.03      83%
+  Information technology     -0.4%   +3.4%   +3.2%  +37.1%  +54.9%    +0.35    +5.75      67%
+  ...
+  Consumer discretionary     -1.9%   -9.6%   -9.7%   -8.2%  -15.2%    -2.28    -3.78      11%
+  Utilities                  -1.9%   -5.9%   -6.1%   -9.7%   +4.9%    -2.53    -5.09       0%
+```
+
+Une valeur haussière sur le trimestre et baissière sur le mois n'est pas en
+tendance haussière : elle est en repli. L'étiquette le dit (`rising`,
+`falling`, `pullback`, `rebound`) au lieu d'arrondir à l'un ou l'autre.
+
+### Et puis on a essayé de s'en servir pour décider
+
+Deux portes, ajoutées et mesurées avec la même discipline que le reste :
+
+- `min_medium_trend` — n'entrer que sur une valeur dont le score moyen terme
+  (rendement 3 et 6 mois sur ATR%) dépasse un seuil ;
+- `sector_top_k` — n'entrer que dans les `k` secteurs les plus forts.
+
+La seconde méritait vraiment d'être testée. La mesure de corrélation plus haut
+dit que **le secteur est l'unité qui se découple réellement** : 0,467 à
+l'intérieur d'un secteur, 0,324 entre deux. Si le momentum transversal devait
+marcher quelque part dans cet univers, c'était là. L'hypothèse était bien
+motivée.
+
+Elle est fausse.
+
+| | in-sample | hors échantillon |
+|---|---|---|
+| **désactivé** | +407,8% | **+214,6%** |
+| moyen terme > 0 | +416,1% | +211,4% |
+| moyen terme > 2 | +417,4% | +189,1% |
+| secteurs top 3 | +269,0% | +121,7% |
+| **secteurs top 5** | **+460,1%** | **+139,9%** |
+| secteurs top 9 | +452,4% | +220,4% |
+
+Le classement s'inverse complètement. `top 5` est le **meilleur** réglage
+in-sample et le **pire** hors échantillon ; `top 9` — qui ne filtre presque
+rien — est le seul à ne pas nuire, ce qui est une autre façon de dire que le
+filtre ne sert à rien. C'est la signature manuelle du surapprentissage, et
+c'est exactement l'histoire du `N = 55` de la version crypto, sur une
+hypothèse bien mieux argumentée.
+
+La porte moyen terme, elle, ne fait rien : un point d'écart in-sample, un point
+d'écart hors échantillon, dans l'autre sens. Elle échange un peu de rendement
+contre un taux de réussite un peu meilleur, ce qui est la description d'un
+filtre qui retire des trades au hasard.
+
+**Les deux sont livrées désactivées.** Le module de tendances reste : c'est un
+bon tableau de bord, et un tableau de bord n'a pas à battre l'indice pour
+mériter sa place. Mais il ne décide de rien, et le backtest est identique bit
+pour bit quand les portes sont à zéro — c'est testé
+(`test_the_gates_change_nothing_while_they_are_off`).
+
+---
+
+## Les actualités : collectées, archivées, et branchées sur rien
+
+L'agent sait lire l'actualité. Il n'en fait rien, et c'est délibéré.
+
+```bash
+python -m trader news --sync
+```
+
+Il récupère les titres de presse de chaque valeur sur une source publique sans
+clé, les score avec un lexique, et les écrit dans la base. **Aucune règle de
+cet agent ne lit un titre.** `Engine.step` ne prend pas d'argument « news », et
+le moteur n'importe pas le module — l'absence est structurelle plutôt qu'un
+réglage à zéro que quelqu'un pourrait basculer, et elle est épinglée par un
+test qui inspecte le graphe d'imports.
+
+### Pourquoi
+
+D'abord une raison de principe : **un signal d'actualité n'est pas
+backtestable ici.** Tout le reste de ce projet est mesuré sur 36 ans ; les
+sources gratuites ne servent que les derniers jours. Il n'y a pas d'archive à
+rejouer, donc pas de façon honnête de tester une règle qui en lirait une.
+
+Ensuite deux mesures, prises sur la première collecte complète de l'univers
+(854 titres) :
+
+- **12% seulement des titres portent un score.** Le reste est du contenu
+  syndiqué — « Is a Recession Coming in 2026? », « Could $5,000 Invested in
+  SpaceX Help You Retire a Millionaire? » — servi sous un ticker parce que le
+  ticker y apparaît quelque part.
+- **L'attribution au ticker n'est pas fiable, et elle l'est mal.** Le flux a
+  classé « Warren Buffett Steps Down as Berkshire's Chair » sous **GOOGL** et
+  « $949 million fraud verdict costs CVS a business » sous **AMZN**. Les deux
+  scorent −1,00, et les deux parlent d'une autre entreprise. Un veto construit
+  là-dessus aurait refusé des entrées à cause de la mauvaise journée de
+  quelqu'un d'autre.
+
+Le score lui-même est un lexique de mots-clés sur des titres. C'est un
+instrument faible et autant le dire franchement : il ne lit pas l'ironie, ne
+pèse pas une rumeur contre un dépôt réglementaire, et « Apple crushes
+estimates » et « Apple crushed by lawsuit » ne diffèrent que par un mot qu'il
+ne comprend pas. Il est là parce qu'il est **auditable** — chaque score se
+trace aux mots qui l'ont produit, et le rapport les imprime — pas parce qu'il
+est bon.
+
+### Alors à quoi sert cette partie
+
+À une seule chose, et elle est réelle : **construire l'archive.**
+
+Chaque titre vu est écrit une fois et jamais réécrit (`INSERT OR IGNORE`, pas
+`OR REPLACE`), en conservant l'instant où il a été *vu*. C'est la seule version
+de cette donnée qui pourra un jour être rejouée sans regarder l'avenir. Au bout
+d'un an de ticks, il y a un an d'archive ; à ce moment-là une règle
+d'actualité devient mesurable, et c'est à ce moment-là qu'il faudra l'écrire —
+pas avant. `reset` efface le compte et garde l'archive : ce n'est pas un état
+du portefeuille, c'est un enregistrement de ce qui était public à quel moment,
+et il ne se reconstitue pas.
+
+C'est aussi pour ça que `news_enabled` est à `false` par défaut : aujourd'hui,
+la collecte coûte une requête par valeur et par tick, et ne rapporte qu'une
+archive plus longue demain.
+
 ---
 
 ## Ce que ce projet ne prouve pas
@@ -569,6 +722,9 @@ dimensionnement continu si votre courtier le permet.
   les dividendes sont implicitement réinvestis dans la position. Aucune fiscalité
   n'est modélisée, et sur une stratégie qui tourne 108 fois par an en
   plus-values court terme, ce n'est pas un détail.
+- **L'agent ne lit pas l'actualité pour décider**, et tant qu'il n'y a pas
+  d'archive assez longue pour le tester, c'est une fonctionnalité absente, pas
+  une fonctionnalité désactivée.
 - **Passer en réel demanderait bien plus** : gestion des pannes, réconciliation
   d'ordres, règles de pattern day trading, arrondis de lot, et une tolérance au
   risque que ce code ne prétend pas encadrer.
@@ -589,10 +745,12 @@ trader/
   indicators.py  EMA, RSI, ATR (Wilder), canal de Donchian — Python pur, alignés
   strategy.py    fonctions pures : signal d'entrée, de sortie, stop suiveur
   ranking.py     force relative transversale (désactivée par défaut)
+  trends.py      tendances 1s/1m/3m/6m/12m, par valeur et par secteur
   regime.py      régime de marché : ancre SPY + ampleur
   risk.py        dimensionnement par distance au stop, actions entières, coupe-circuits
   portfolio.py   compte virtuel : frais, slippage, P&L
-  store.py       SQLite : séances, positions, ordres en attente, trades, décisions
+  news.py        collecte et score des titres de presse — ne décide de rien
+  store.py       SQLite : séances, positions, ordres, trades, décisions, archive presse
   engine.py      LE pas de décision — partagé mot pour mot par le live et le backtest
   scheduler.py   quand se réveiller, sur un calendrier troué
   agent.py       boucle live : sync, rattrapage, tick, persistance, programmation
@@ -609,6 +767,9 @@ Trois invariants portent le reste :
    l'estampille `created_ts` existent pour ça, et rien d'autre.
 3. **Le live et le backtest appellent `Engine.step`**, le même code. Si le
    backtest exécutait autre chose, il décrirait un système qui n'existe pas.
+4. **Rien qui ne soit pas mesurable n'atteint le compte.** C'est pourquoi les
+   actualités sont collectées et archivées mais jamais consultées, et pourquoi
+   le moteur n'importe même pas leur module.
 
 ## Configuration
 
@@ -625,7 +786,7 @@ Une clé inconnue déclenche une erreur explicite plutôt qu'un silence.
 ## Tests
 
 ```bash
-python -m pytest        # 151 tests, hors ligne, ~10 s
+python -m pytest        # 187 tests, hors ligne, ~11 s
 python -m ruff check .
 ```
 
@@ -640,6 +801,10 @@ Les deux tests les plus importants :
   même fenêtre.
 - `test_every_fill_happens_at_an_opening_print` — aucun ordre ne se remplit au
   prix qui l'a déclenché.
+- `test_no_trading_decision_can_read_a_headline` — le moteur n'importe pas le
+  module d'actualités et `Engine.step` ne prend pas d'argument pour en
+  recevoir. Une absence se perd facilement dans un refactor, donc elle est
+  épinglée plutôt que confiée à un commentaire.
 
 ## Pistes suivantes
 
@@ -649,6 +814,10 @@ Les deux tests les plus importants :
 - Le réglage in-sample n'a rien rendu hors échantillon. La conclusion raisonnable
   n'est pas de mieux régler, c'est d'arrêter de régler et de chercher un signal
   différent, testé avec la même discipline avant d'être activé.
+- **L'archive de presse est la seule chose de ce dépôt qui s'améliore toute
+  seule.** Elle ne vaut rien aujourd'hui et vaudra quelque chose dans un an, à
+  la seule condition qu'on laisse l'agent tourner. La règle qui la lira reste à
+  écrire, et à tester comme le reste.
 - L'agent garde 41% de son capital en cash en moyenne, sans rien en faire. Un
   placement monétaire sur cette trésorerie est la seule amélioration de
   rendement de ce document qui ne demande aucun pari — et sur 36 ans à 41%, ce

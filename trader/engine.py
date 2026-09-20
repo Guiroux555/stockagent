@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from . import indicators as ind
-from . import ranking, regime
+from . import ranking, regime, trends
 from . import strategy as strat
 from .config import Settings
 from .models import Decision, Order, Trade
@@ -97,6 +97,11 @@ class Engine:
         but no signal is read, no trailing stop is moved and nothing new is
         queued. That asymmetry is the honest cost of a low cadence, and it is
         what the cadence table in the README measures.
+
+        Nothing in this method reads a headline. `news.py` collects and scores
+        them, and deliberately stops there — see its module docstring and the
+        README for why a signal that cannot be backtested is not allowed to
+        reach the account.
         """
         pf = self.portfolio
         closes = {sym: v.analysis.closes[v.index] for sym, v in views.items()}
@@ -434,9 +439,16 @@ class Engine:
 
         # The ranking spans the whole tradable universe, held names included:
         # how strong a stock is does not depend on whether we happen to own it.
-        ranks = ranking.rank_universe(
-            {k: v for k, v in views.items() if k in set(s.universe)}, s
-        )
+        tradable_views = {k: v for k, v in views.items() if k in set(s.universe)}
+        ranks = ranking.rank_universe(tradable_views, s)
+
+        # The trend ladder is only computed when a gate actually reads it:
+        # eighty-seven names over five horizons on every session is real work,
+        # and paying for it to be discarded would be silly.
+        gated = s.min_medium_trend != 0.0 or s.sector_top_k > 0
+        ladder = trends.collect(tradable_views, s) if gated else {}
+        sectors = trends.sector_ranks(ladder, s) if s.sector_top_k > 0 else {}
+
         selling = {o.symbol for o in queue if o.side == "SELL" and o.fraction >= 1.0}
 
         candidates = []
@@ -468,6 +480,25 @@ class Engine:
                     )
                 )
                 continue
+
+            if gated:
+                in_trend, trend_note = trends.passes(symbol, ladder, sectors, s)
+                if not in_trend:
+                    result.decisions.append(
+                        Decision(
+                            ts,
+                            symbol,
+                            "HOLD",
+                            f"signal fired but rejected on trend: {trend_note}",
+                            sig.price,
+                            0.0,
+                            equity,
+                            {"strength": sig.strength},
+                        )
+                    )
+                    continue
+                if trend_note:
+                    sig.reason = f"{sig.reason}; {trend_note}"
 
             if rs_note:
                 sig.reason = f"{sig.reason}; {rs_note}"
