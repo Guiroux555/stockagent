@@ -296,6 +296,30 @@ class Settings:
     gap breaks that promise by jumping the stop instead of crossing it. See
     `events.py` and the README."""
 
+    earnings_date_source: str = "projected"
+    """Where the *next* release date comes from: `projected` or `scheduled`.
+
+    This is the only place where an honest disagreement is possible, so both
+    answers are shipped and both are measured.
+
+    `projected` estimates it from the company's own filing history. It is what
+    a live agent can actually compute, so the backtest and the live run see
+    exactly the same thing — the invariant this project is built on. It is also
+    noisier than reality: measured against what actually happened, it is exact
+    39% of the time and within a week 73% of the time.
+
+    `scheduled` reads the real next filing date, but only once it is within
+    `earnings_announce_horizon` sessions — the window in which companies have
+    publicly put it on the calendar, so it is knowledge rather than hindsight.
+    It is more faithful to what a participant knew and less faithful to what
+    this program can reproduce live. Treat its results as the ceiling a perfect
+    calendar would reach, not as the shipped behaviour."""
+
+    earnings_announce_horizon: int = 15
+    """Sessions before a release within which its date counts as publicly
+    scheduled. Three weeks: companies routinely announce the date a month
+    ahead, so this is conservative."""
+
     earnings_blackout_before: int = 2
     """Sessions before a *confirmed* release during which no new position is
     opened. Two, because the agent decides on a close and fills at the next
@@ -307,6 +331,18 @@ class Settings:
     filing. A wrong date is worse than no date — it blocks the safe day and
     leaves the dangerous one open — so an estimate buys a wider window rather
     than the same confidence."""
+    earnings_exit_before: int = 0
+    """Sessions before a release at which an open position is closed; 0
+    disables, and it ships disabled.
+
+    **This is a measurement, not a feature**, in the same spirit as
+    `execute_at_close`. Selling before every release is standard advice for
+    event strategies and wrong for a trend follower: more than half the
+    positions here span a release, so honouring it means closing most of the
+    book every quarter and cutting exactly the long winners that pay for the
+    small losses. The expectation was written down before the run; the README
+    reports what the run said."""
+
     earnings_size_factor: float = 0.5
     """Position multiplier in `reduce` mode. Halving the size halves the gap
     loss, which is the quantity the promise in `risk.py` is about."""

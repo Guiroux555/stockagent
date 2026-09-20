@@ -51,6 +51,9 @@ EARNINGS_ITEM = "2.02"
 An 8-K without it is a different event — a director leaving, a covenant
 waiver — and not the one this module is about."""
 
+SESSIONS_PER_YEAR = 252
+SESSIONS_PER_QUARTER = 63
+
 CLOSING_HOUR = 16
 """Exchange-local hour after which a filing can only move the *next* open."""
 
@@ -574,3 +577,135 @@ def gap_study(store, settings: Settings, floor: str = COVERAGE_FLOOR) -> GapStud
     study.event_sessions = len(study.event_gaps)
     study.other_sessions = len(study.other_gaps)
     return study
+
+
+# --- the per-symbol calendar the engine actually reads -----------------------
+
+
+class Calendar:
+    """One symbol's releases, resolved onto its own sessions.
+
+    Built once and queried per session, because the engine asks this question
+    eighty-seven times a day across nine thousand days and a linear scan over
+    a hundred filings would cost more than the rest of the step put together.
+
+    Every answer it gives is point-in-time. Past releases are read from
+    filings, which is exact. The *next* one is either projected from the
+    company's own history or, with `scheduled`, revealed only once it is inside
+    the horizon where a participant would have had it on their calendar — never
+    earlier, and never from a filing that has not happened.
+    """
+
+    def __init__(self, symbol: str, sessions: list[str], events: list[EarningsDate]):
+        self.symbol = symbol
+        self.sessions = sessions
+        self._slots = self._resolve(sessions, events)
+
+    @staticmethod
+    def _resolve(sessions: list[str], events: list[EarningsDate]) -> list[int]:
+        """Session index of each confirmed release, in order.
+
+        A release dated on a day the exchange was shut lands on the next
+        session that exists, which is where its gap actually shows up.
+        """
+        if not sessions:
+            return []
+        days = sorted({e.event_date for e in events if e.confirmed})
+        out: list[int] = []
+        cursor = 0
+        for day in days:
+            while cursor < len(sessions) and sessions[cursor] < day:
+                cursor += 1
+            if cursor >= len(sessions):
+                break
+            out.append(cursor)
+        return out
+
+    def _position(self, index: int) -> int:
+        """How many releases have happened at or before `index`."""
+        lo, hi = 0, len(self._slots)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self._slots[mid] <= index:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    def _previous(self, index: int) -> int | None:
+        """The last release at or before `index`."""
+        position = self._position(index)
+        return self._slots[position - 1] if position else None
+
+    def _next_known(self, index: int, settings: Settings) -> tuple[int, str] | None:
+        """The next release, as far as it is legitimately knowable at `index`."""
+        if settings.earnings_date_source == "scheduled":
+            for slot in self._slots:
+                if slot > index:
+                    if slot - index <= settings.earnings_announce_horizon:
+                        return slot, "confirmed"
+                    return None
+            return None
+
+        # Projected: one year on from the matching release four quarters back.
+        # Only filings already made are read, so this is safe inside a replay.
+        position = self._position(index)
+        if position < 4:
+            return None
+        anchor = self._slots[position - 4]
+        projected = anchor + SESSIONS_PER_YEAR
+        # Step on a quarter at a time until the estimate is in the future: a
+        # company that has skipped a filing must not be projected into the past.
+        while projected <= index:
+            projected += SESSIONS_PER_QUARTER
+        if projected >= len(self.sessions):
+            return None
+        return projected, "estimated"
+
+    def window(self, index: int, settings: Settings) -> EventWindow:
+        """Where session `index` sits relative to the nearest release."""
+        if not self._slots or index < 0 or index >= len(self.sessions):
+            return EventWindow(self.symbol)
+
+        previous = self._previous(index)
+        if previous is not None:
+            _, after = settings.blackout_window("confirmed")
+            since = index - previous
+            if 0 <= since <= after:
+                return EventWindow(
+                    self.symbol,
+                    None,
+                    since,
+                    "confirmed",
+                    self.sessions[previous],
+                )
+
+        upcoming = self._next_known(index, settings)
+        if upcoming is not None:
+            slot, status = upcoming
+            before, _ = settings.blackout_window(status)
+            until = slot - index
+            if 0 <= until <= before:
+                return EventWindow(
+                    self.symbol, until, None, status, self.sessions[slot]
+                )
+        return EventWindow(self.symbol)
+
+
+def calendars(store, settings: Settings, series: dict) -> dict[str, Calendar]:
+    """A calendar per tradable symbol, from the cached filings.
+
+    Names whose calendar is too thin for their price history are left out
+    entirely rather than half-covered: a filter that protects three quarters of
+    a name's releases and silently ignores the rest is worse than one that
+    admits it knows nothing, because it looks like protection either way.
+    """
+    usable = {c.symbol for c in coverage(store, settings) if c.usable(settings)}
+    out: dict[str, Calendar] = {}
+    for symbol, bars in series.items():
+        if symbol not in usable or symbol not in set(settings.universe):
+            continue
+        events = store.load_earnings(symbol)
+        if events:
+            out[symbol] = Calendar(symbol, [b.session for b in bars], events)
+    return out

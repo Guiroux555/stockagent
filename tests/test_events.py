@@ -259,3 +259,94 @@ def test_every_mode_is_a_known_one(settings, mode):
     cfg = replace(settings, earnings_mode=mode)
     allowed, size, _ = passes(EventWindow("AAPL", sessions_until=0), cfg)
     assert isinstance(allowed, bool) and 0.0 <= size <= 1.0
+
+
+# --- the fast calendar the engine reads -------------------------------------
+
+
+def calendar_for(settings, event_days, sessions=None):
+    from trader.events import Calendar
+
+    sessions = sessions or SESSIONS
+    rows = [EarningsDate("AAPL", d, d, 0, "confirmed") for d in event_days]
+    return Calendar("AAPL", sessions, rows)
+
+
+def test_the_calendar_never_reveals_a_filing_that_has_not_happened(settings):
+    """A confirmed future date is the one thing that would turn this from
+    knowledge into hindsight, so `projected` must not see it."""
+    cal = calendar_for(settings, ["2026-03-20"])
+    cfg = replace(settings, earnings_mode="block", earnings_date_source="projected")
+    w = cal.window(SESSIONS.index("2026-03-19"), cfg)
+    assert w.status != "confirmed"
+
+
+def test_scheduled_mode_reveals_it_only_inside_the_announce_horizon(settings):
+    """Companies put the date on their calendar weeks ahead. Three weeks out
+    that is knowledge; three months out it is not."""
+    cal = calendar_for(settings, ["2026-03-20"])
+    cfg = replace(
+        settings,
+        earnings_mode="block",
+        earnings_date_source="scheduled",
+        earnings_announce_horizon=3,
+    )
+    assert cal.window(SESSIONS.index("2026-03-18"), cfg).status == "confirmed"
+
+    narrow = replace(cfg, earnings_announce_horizon=1)
+    assert not cal.window(SESSIONS.index("2026-03-17"), narrow).inside
+
+
+def test_a_past_release_is_always_exact(settings):
+    """The after-window reads filings, so it never depends on a projection."""
+    cal = calendar_for(settings, ["2026-03-10"])
+    cfg = replace(settings, earnings_mode="block")
+    w = cal.window(SESSIONS.index("2026-03-11"), cfg)
+    assert w.status == "confirmed" and w.sessions_since == 1
+
+
+def test_a_release_on_a_closed_day_moves_to_the_next_session(settings):
+    sessions = ["2026-03-05", "2026-03-06", "2026-03-09"]
+    cal = calendar_for(settings, ["2026-03-07"], sessions)
+    cfg = replace(settings, earnings_mode="block")
+    assert cal.window(2, cfg).sessions_since == 0
+
+
+def test_the_calendar_answers_the_same_way_however_it_is_queried(settings):
+    """`Calendar` exists only because `window_for` is too slow to call nine
+    thousand times a day. If the two disagree, the optimisation has changed
+    the strategy."""
+    cfg = replace(
+        settings, earnings_mode="block", earnings_date_source="scheduled",
+        earnings_announce_horizon=60,
+    )
+    days = ["2026-03-10", "2026-03-20"]
+    cal = calendar_for(cfg, days)
+    rows = [EarningsDate("AAPL", d, d, 0, "confirmed") for d in days]
+    for i in range(len(SESSIONS)):
+        fast = cal.window(i, cfg)
+        slow = window_for("AAPL", SESSIONS, i, rows, cfg)
+        assert fast.inside == slow.inside, SESSIONS[i]
+
+
+def test_a_name_with_a_thin_calendar_is_left_out_entirely(settings):
+    """Half-covering a name is worse than admitting it is not covered: it
+    blocks the sessions it knows about and leaves the rest open, while looking
+    like protection either way."""
+    from conftest import bars_from_closes, trending_closes
+
+    from trader.events import calendars
+
+    cfg = replace(settings, universe=("AAA", "BBB"), earnings_mode="block")
+    store = Store(":memory:")
+    series = {}
+    for sym in cfg.universe:
+        bars = bars_from_closes(trending_closes(n=800))
+        store.save_bars(sym, cfg.interval, bars)
+        series[sym] = bars
+    store.save_earnings(quarterly(symbol="AAA", count=40))
+    store.save_earnings([quarterly(symbol="BBB", count=1)[0]])
+
+    books = calendars(store, cfg, series)
+    store.close()
+    assert "AAA" in books and "BBB" not in books

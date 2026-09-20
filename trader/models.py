@@ -145,6 +145,9 @@ class Signal:
     atr: float = 0.0
     stop: float = 0.0
     strength: float = 0.0
+    size_factor: float = 1.0
+    """Set below 1 by a gate that wanted the trade smaller rather than
+    refused."""
 
 
 @dataclass
@@ -170,6 +173,10 @@ class Order:
     atr: float = 0.0
     fraction: float = 1.0
     """Share of the position to sell, for a scale-out. Ignored on a buy."""
+    size_factor: float = 1.0
+    """Multiplier applied when the order is sized at the fill. Below 1 when a
+    gate wanted the trade smaller rather than refused — the sizing happens at
+    the open, so the decision to shrink has to travel with the order."""
     created_ts: int = 0
 
     @property

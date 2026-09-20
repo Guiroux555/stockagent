@@ -342,3 +342,123 @@ def test_close_fill_mode_leaves_nothing_queued(settings, one_name):
     engine, _, steps = run(cheating, one_name)
     assert engine.pending == []
     assert all(r.orders == [] for _, r in steps)
+
+
+# --- the earnings blackout --------------------------------------------------
+
+
+def _with_calendar(cfg, series, event_sessions):
+    """An engine whose calendar marks the given sessions as release days."""
+    from trader.events import Calendar, EarningsDate
+
+    bars = series["AAA"]
+    sessions = [b.session for b in bars]
+    rows = [
+        EarningsDate("AAA", sessions[k], sessions[k], 0, "confirmed")
+        for k in event_sessions
+    ]
+    pf = Portfolio(cfg)
+    return pf, Engine(cfg, pf, calendars={"AAA": Calendar("AAA", sessions, rows)})
+
+
+def _first_buy_session(cfg, series) -> int:
+    """A session the strategy wants to buy on, so a gate test is about the
+    gate and not about a session with no signal in it."""
+    from dataclasses import replace as _replace
+
+    plain = _replace(cfg, earnings_mode="off")
+    for i in range(plain.warmup_bars, len(series["AAA"]) - 2):
+        pf, engine = _with_calendar(plain, series, [])
+        out = engine.step(make_views(series, plain, i), i, 1e5, 1e5, decide=True)
+        if [o for o in out.orders if o.side == "BUY"]:
+            return i
+    raise AssertionError("the synthetic series never queued a buy")
+
+
+def test_block_mode_refuses_to_queue_before_a_release(settings, one_name):
+    from dataclasses import replace as _replace
+
+    cfg = _replace(
+        settings, universe=("AAA",), market_anchor="", min_notional=0.0,
+        earnings_mode="block", earnings_date_source="scheduled",
+        earnings_announce_horizon=30,
+    )
+    i = _first_buy_session(cfg, one_name)
+    pf, engine = _with_calendar(cfg, one_name, [i + 1])
+    result = engine.step(make_views(one_name, cfg, i), i, 1e5, 1e5, decide=True)
+    assert not [o for o in result.orders if o.side == "BUY"]
+    assert any("stood down for earnings" in d.reason for d in result.decisions)
+
+
+def test_reduce_mode_queues_a_smaller_order_instead(settings, one_name):
+    """More surgical than refusing: the breakout is still a breakout, it is the
+    unbounded gap that is the problem."""
+    from dataclasses import replace as _replace
+
+    cfg = _replace(
+        settings, universe=("AAA",), market_anchor="", min_notional=0.0,
+        earnings_mode="reduce", earnings_date_source="scheduled",
+        earnings_announce_horizon=30,
+    )
+    found = _first_buy_session(cfg, one_name)
+    pf, engine = _with_calendar(cfg, one_name, [found + 1])
+    result = engine.step(make_views(one_name, cfg, found), found, 1e5, 1e5, decide=True)
+    buys = [o for o in result.orders if o.side == "BUY"]
+    assert buys and buys[0].size_factor == cfg.earnings_size_factor
+
+
+def test_a_reduced_order_really_buys_less(settings, one_name):
+    """The factor has to reach the sizing, not just ride on the order."""
+    from dataclasses import replace as _replace
+
+    from trader.models import Order
+
+    cfg = _replace(settings, universe=("AAA",), market_anchor="", min_notional=0.0)
+    a = analyze(one_name["AAA"], cfg)
+    i = cfg.warmup_bars + 10
+    sizes = []
+    for factor in (1.0, 0.5):
+        pf = Portfolio(cfg)
+        engine = Engine(cfg, pf)
+        engine.pending = [
+            Order("AAA", "BUY", "test", a.opens[i], stop=a.opens[i] * 0.9,
+                  atr=a.opens[i] * 0.02, size_factor=factor,
+                  created_ts=a.bars[i - 1].open_time)
+        ]
+        engine.step(make_views(one_name, cfg, i), i, 1e5, 1e5, decide=False)
+        sizes.append(pf.positions["AAA"].qty if "AAA" in pf.positions else 0)
+    assert sizes[1] < sizes[0]
+
+
+def test_the_blackout_never_blocks_an_exit(settings, one_name):
+    """The invariant of this project: an agent that cannot close a losing
+    position because of a calendar is exactly the wrong way round."""
+    from dataclasses import replace as _replace
+
+    cfg = _replace(
+        settings, universe=("AAA",), market_anchor="", min_notional=0.0,
+        earnings_mode="block", earnings_date_source="scheduled",
+        earnings_announce_horizon=30,
+    )
+    i = cfg.warmup_bars + 40
+    pf, engine = _with_calendar(cfg, one_name, [i, i + 1])
+    a = analyze(one_name["AAA"], cfg)
+    pf.positions["AAA"] = Position(
+        symbol="AAA", qty=10, entry_price=a.closes[i - 1], entry_time=0,
+        stop=a.lows[i] * 1.001, peak=a.closes[i - 1], atr_at_entry=1.0,
+        initial_risk=1.0, bars_held=50,
+    )
+    result = engine.step(make_views(one_name, cfg, i), i, 1e5, 1e5, decide=True)
+    assert result.trades and result.trades[0].reason == "stop hit"
+
+
+def test_an_off_blackout_changes_nothing(settings, one_name):
+    from dataclasses import replace as _replace
+
+    cfg = _replace(settings, universe=("AAA",), market_anchor="", min_notional=0.0)
+    i = cfg.warmup_bars + 40
+    plain = Engine(cfg, Portfolio(cfg))
+    _, gated = _with_calendar(cfg, one_name, [i + 1])
+    a = plain.step(make_views(one_name, cfg, i), i, 1e5, 1e5, decide=True)
+    b = gated.step(make_views(one_name, cfg, i), i, 1e5, 1e5, decide=True)
+    assert [o.symbol for o in a.orders] == [o.symbol for o in b.orders]

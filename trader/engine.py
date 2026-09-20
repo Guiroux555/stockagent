@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from . import events as calendar
 from . import indicators as ind
 from . import ranking, regime, trends
 from . import strategy as strat
@@ -71,6 +72,7 @@ class Engine:
         on_trade: Callable[[Trade], None] | None = None,
         halted: bool = False,
         pending: list[Order] | None = None,
+        calendars: dict | None = None,
     ):
         self.settings = settings
         self.portfolio = portfolio
@@ -79,6 +81,13 @@ class Engine:
         """Drawdown breaker latch, carried between steps. A backtest keeps one
         engine for the whole run; a live tick loads it from the store."""
         self.pending: list[Order] = list(pending or [])
+        self.calendars: dict = calendars or {}
+        """Earnings dates per symbol, resolved onto that symbol's sessions.
+
+        Built once by the caller rather than per step, and empty unless the
+        blackout is switched on. Unlike the news archive this *is* handed to
+        the engine, because a filing date is knowledge a participant had at the
+        time rather than an interpretation made afterwards — see `events.py`."""
 
     # ------------------------------------------------------------------
 
@@ -266,7 +275,9 @@ class Engine:
                 f" ({order.signal_price:.2f} -> {price:.2f})"
             )
 
-        sizing = size_position(pf, price, order.stop, equity, open_prices, s)
+        sizing = size_position(
+            pf, price, order.stop, equity, open_prices, s, scale=order.size_factor
+        )
         if not sizing.ok:
             return refuse(f"queued buy not sized: {sizing.reason}")
 
@@ -366,6 +377,25 @@ class Engine:
                     )
                 )
                 continue
+
+            if s.earnings_exit_before > 0:
+                book = self.calendars.get(symbol)
+                window = book.window(view.index, s) if book else None
+                if (
+                    window is not None
+                    and window.sessions_until is not None
+                    and window.sessions_until <= s.earnings_exit_before
+                ):
+                    queue.append(
+                        Order(
+                            symbol,
+                            "SELL",
+                            f"closed ahead of earnings on {window.event_date}",
+                            sig.price,
+                            created_ts=a.bars[i].open_time,
+                        )
+                    )
+                    continue
 
             if strat.should_scale_out(pos, sig.price, s):
                 r = pos.r_multiple(sig.price)
@@ -500,8 +530,31 @@ class Engine:
                 if trend_note:
                     sig.reason = f"{sig.reason}; {trend_note}"
 
+            size_factor = 1.0
+            book = self.calendars.get(symbol)
+            if book is not None:
+                window = book.window(view.index, s)
+                allowed, size_factor, event_note = calendar.passes(window, s)
+                if not allowed:
+                    result.decisions.append(
+                        Decision(
+                            ts,
+                            symbol,
+                            "HOLD",
+                            f"signal fired but stood down for {event_note}",
+                            sig.price,
+                            0.0,
+                            equity,
+                            {"strength": sig.strength, "event": window.event_date},
+                        )
+                    )
+                    continue
+                if event_note:
+                    sig.reason = f"{sig.reason}; {event_note}"
+
             if rs_note:
                 sig.reason = f"{sig.reason}; {rs_note}"
+            sig.size_factor = size_factor
             candidates.append(sig)
 
         if s.rs_top_k > 0:
@@ -544,6 +597,7 @@ class Engine:
                     signal_price=sig.price,
                     stop=sig.stop,
                     atr=sig.atr,
+                    size_factor=sig.size_factor,
                     created_ts=view.bar.open_time,
                 )
             )

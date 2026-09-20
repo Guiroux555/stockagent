@@ -12,6 +12,7 @@ import time as clock
 from datetime import datetime, timezone
 
 from . import data as market
+from . import events as calendar
 from . import news as newsfeed
 from .config import Settings
 from .engine import Engine, StepResult, SymbolView, market_stats
@@ -156,6 +157,9 @@ def run_tick(
 
     if do_sync:
         sync(store, settings, log=log)
+        if settings.earnings_mode != "off":
+            fresh = sum(calendar.sync(store, settings, log=log).values())
+            log(f"  {fresh} new earnings date(s) cached")
         if settings.news_enabled:
             # Collected and archived. Not consulted: no rule in this agent
             # reads a headline. See `news.py`.
@@ -180,12 +184,20 @@ def run_tick(
     # The drawdown latch and the resting order queue both have to outlive the
     # process. An agent that forgets it halted resumes on the next wake-up, and
     # one that forgets its queue buys nothing it decided on yesterday.
+    books = {}
+    if settings.earnings_mode != "off":
+        series = {
+            symbol: view.analysis.bars for symbol, view in views.items()
+        }
+        books = calendar.calendars(store, settings, series)
+
     engine = Engine(
         settings,
         portfolio,
         on_trade=store.save_trade,
         halted=bool(store.get_state(K_HALTED, False)),
         pending=store.load_orders(),
+        calendars=books,
     )
 
     if len(steps) > 1:

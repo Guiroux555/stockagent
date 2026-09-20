@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS pending_orders (
     stop         REAL NOT NULL DEFAULT 0,
     atr          REAL NOT NULL DEFAULT 0,
     fraction     REAL NOT NULL DEFAULT 1,
+    size_factor  REAL NOT NULL DEFAULT 1,
     created_ts   INTEGER NOT NULL
 );
 
@@ -145,7 +146,10 @@ class Store:
         paper account survives an upgrade instead of having to be wiped.
         """
         added = {
-            "pending_orders": {"fraction": "REAL NOT NULL DEFAULT 1"},
+            "pending_orders": {
+                "fraction": "REAL NOT NULL DEFAULT 1",
+                "size_factor": "REAL NOT NULL DEFAULT 1",
+            },
             "positions": {
                 "initial_risk": "REAL NOT NULL DEFAULT 0",
                 "scaled_out": "INTEGER NOT NULL DEFAULT 0",
@@ -296,8 +300,8 @@ class Store:
         self.conn.execute("DELETE FROM pending_orders")
         self.conn.executemany(
             "INSERT OR REPLACE INTO pending_orders"
-            " (symbol,side,reason,signal_price,stop,atr,fraction,created_ts)"
-            " VALUES (?,?,?,?,?,?,?,?)",
+            " (symbol,side,reason,signal_price,stop,atr,fraction,size_factor,"
+            "created_ts) VALUES (?,?,?,?,?,?,?,?,?)",
             [
                 (
                     o.symbol,
@@ -307,6 +311,7 @@ class Store:
                     o.stop,
                     o.atr,
                     o.fraction,
+                    o.size_factor,
                     o.created_ts,
                 )
                 for o in orders
@@ -327,6 +332,7 @@ class Store:
                 stop=r["stop"],
                 atr=r["atr"],
                 fraction=r["fraction"],
+                size_factor=r["size_factor"],
                 created_ts=r["created_ts"],
             )
             for r in rows

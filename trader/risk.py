@@ -41,8 +41,14 @@ def size_position(
     equity: float,
     prices: dict[str, float],
     settings: Settings,
+    scale: float = 1.0,
 ) -> Sizing:
     """How many shares to buy at `price`, with the stop already chosen.
+
+    `scale` shrinks the whole budget rather than the final share count, so
+    every cap below still binds on the reduced position and the whole-share
+    rounding happens last. Halving after the caps would let a capped position
+    come back over its cap.
 
     `price` is the price the order will actually fill at — for this agent, the
     next session's opening print, not the close the signal was computed on.
@@ -58,12 +64,16 @@ def size_position(
     if stop_distance <= 0:
         return Sizing(0.0, "stop is not below entry")
 
-    risk_amount = equity * settings.risk_per_trade
+    scale = max(0.0, min(scale, 1.0))
+    if scale == 0.0:
+        return Sizing(0.0, "size scaled to zero")
+
+    risk_amount = equity * settings.risk_per_trade * scale
     qty = risk_amount / stop_distance
     binding = "risk budget"
 
     # Never let one name dominate the book, however tight its stop.
-    cap_position = equity * settings.max_position_pct / fill
+    cap_position = equity * settings.max_position_pct * scale / fill
     if cap_position < qty:
         qty, binding = cap_position, "max position size"
 

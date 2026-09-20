@@ -14,9 +14,11 @@ the claim worth making.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from . import events
 from .config import Settings
 from .engine import Engine, SymbolView
 from .models import Bar, Trade, utc
@@ -65,6 +67,15 @@ class Report:
     sessions: int = 0
     decisions: int = 0
     decide_every: int = 1
+    worst_gap: float = 0.0
+    """Worst overnight gap the account actually lived through with a position
+    open. The headline of any tail measurement: a filter meant to bound gap
+    loss that does not move this number has not done its job."""
+    worst_gap_where: str = ""
+    calendars: int = 0
+    """Names whose earnings calendar was complete enough to be used. Printed
+    because a filter that silently covers two thirds of the universe is not the
+    filter the header claims it is."""
     halted_at: int | None = None
     """When the drawdown breaker first latched, if it ever did. A run that
     freezes and reports nothing about it is a run that lies by omission."""
@@ -93,6 +104,65 @@ class Report:
             if peak > 0:
                 worst = max(worst, 1 - eq / peak)
         return worst
+
+    @property
+    def session_returns(self) -> list[float]:
+        """Session-to-session equity returns, for the risk statistics below."""
+        curve = [e for _, e in self.equity_curve]
+        return [
+            curve[i] / curve[i - 1] - 1.0
+            for i in range(1, len(curve))
+            if curve[i - 1] > 0
+        ]
+
+    @property
+    def sharpe(self) -> float:
+        """Per-session Sharpe, excess of nothing.
+
+        Deliberately not annualised: the deflation below is defined on the
+        statistic and its sample size, and scaling one without the other is how
+        a Sharpe gets flattered by a square root.
+        """
+        rets = self.session_returns
+        if len(rets) < 30:
+            return 0.0
+        mean = sum(rets) / len(rets)
+        var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+        return mean / math.sqrt(var) if var > 0 else 0.0
+
+    @property
+    def skew(self) -> float:
+        return _moment(self.session_returns, 3)
+
+    @property
+    def kurtosis(self) -> float:
+        """Non-excess kurtosis, which is what the deflation formula wants."""
+        return _moment(self.session_returns, 4)
+
+    def deflated_sharpe(self, trials: int, sr_variance: float) -> float:
+        return deflated_sharpe(
+            self.sharpe,
+            len(self.session_returns),
+            self.skew,
+            self.kurtosis,
+            trials,
+            sr_variance,
+        )
+
+    @property
+    def top_losses(self) -> list[float]:
+        return sorted(self.round_trips)[:10]
+
+    @property
+    def win_loss_ratio(self) -> float:
+        """Average win over average loss. A veto that removes a few disasters
+        should move this even when it leaves the return alone."""
+        wins, losses = self.wins, self.losses
+        if not wins or not losses:
+            return 0.0
+        avg_win = sum(wins) / len(wins)
+        avg_loss = abs(sum(losses) / len(losses))
+        return avg_win / avg_loss if avg_loss else 0.0
 
     @property
     def avg_exposure(self) -> float:
@@ -219,6 +289,13 @@ class Report:
             f"  Cadence           decides {cadence}"
             f"  ({self.decisions} decision sessions)",
             "  Execution         signal at the close, fill at the next open",
+            (
+                f"  Earnings          {settings.earnings_mode} on"
+                f" {self.calendars}/{len(settings.universe)} names"
+                f"  ({settings.earnings_date_source} dates)"
+                if settings.earnings_mode != "off"
+                else "  Earnings          blackout off"
+            ),
             "",
             f"  Start equity      {self.initial:12.2f} {q}",
             f"  Final equity      {self.final:12.2f} {q}",
@@ -269,6 +346,22 @@ class Report:
         ]
 
         if self.round_trips:
+            worst = self.top_losses
+            lines += [
+                "",
+                "  THE TAIL  (what a disaster costs, which is not the CAGR)",
+                f"  Worst position    {worst[0]:+12,.2f} {q}"
+                + (
+                    f"   ten worst total {sum(worst):+,.0f}"
+                    if len(worst) == 10
+                    else ""
+                ),
+                f"  Worst gap held    {self.worst_gap:12.2%}"
+                + (f"   {self.worst_gap_where}" if self.worst_gap_where else ""),
+                f"  Avg win / loss    {self.win_loss_ratio:12.2f}",
+            ]
+
+        if self.round_trips:
             ex5 = self.pnl_excluding_best(5)
             good, total = self.positive_years
             lines += [
@@ -298,6 +391,79 @@ class Report:
 
         lines.append("=" * 66)
         return "\n".join(lines)
+
+
+def _moment(values: list[float], order: int) -> float:
+    if len(values) < 30:
+        return 0.0
+    mean = sum(values) / len(values)
+    var = sum((v - mean) ** 2 for v in values) / len(values)
+    if var <= 0:
+        return 0.0
+    sd = math.sqrt(var)
+    return sum(((v - mean) / sd) ** order for v in values) / len(values)
+
+
+def _phi(x: float) -> float:
+    """Standard normal CDF, from the error function in the standard library."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _phi_inv(p: float) -> float:
+    """Inverse normal CDF, by bisection.
+
+    Good to about twelve digits over the range that matters here, and short
+    enough to read — which beats pulling in scipy for one number.
+    """
+    p = min(max(p, 1e-12), 1 - 1e-12)
+    lo, hi = -12.0, 12.0
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if _phi(mid) < p:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+EULER = 0.5772156649015329
+
+
+def deflated_sharpe(
+    sharpe: float,
+    observations: int,
+    skew: float,
+    kurtosis: float,
+    trials: int,
+    sr_variance: float,
+) -> float:
+    """Probability the Sharpe is real, given how many settings were tried.
+
+    Bailey and Lopez de Prado's deflation. The idea it encodes is the one this
+    whole project keeps running into: try a hundred parameter sets on one
+    history and the best of them looks good whether or not anything works. The
+    benchmark it must beat is the Sharpe the *luckiest* of `trials` random
+    strategies would have reached, which grows with the number of trials.
+
+    `trials` has to be counted honestly, including the settings that were tried
+    and discarded. Undercounting it is the easiest way to make this number say
+    what you want.
+    """
+    if observations < 30 or trials < 1 or sr_variance <= 0:
+        return 0.0
+
+    # Expected maximum Sharpe across `trials` draws under the null.
+    gamma = EULER
+    expected_max = math.sqrt(sr_variance) * (
+        (1 - gamma) * _phi_inv(1 - 1.0 / trials)
+        + gamma * _phi_inv(1 - 1.0 / (trials * math.e))
+    )
+
+    denominator = 1.0 - skew * sharpe + (kurtosis - 1.0) / 4.0 * sharpe**2
+    if denominator <= 0:
+        return 0.0
+    z = (sharpe - expected_max) * math.sqrt(observations - 1) / math.sqrt(denominator)
+    return _phi(z)
 
 
 def _wrap_years(years: dict[int, float], per_line: int = 6) -> list[str]:
@@ -345,9 +511,17 @@ def run_backtest(
         sym: {b.open_time: i for i, b in enumerate(bars)} for sym, bars in series.items()
     }
 
+    # Earnings dates are resolved once, not per session. Empty unless the
+    # blackout is on, so a run that does not use them pays nothing for them.
+    books = (
+        events.calendars(store, settings, series)
+        if settings.earnings_mode != "off"
+        else {}
+    )
+
     portfolio = Portfolio(settings)
     trades: list[Trade] = []
-    engine = Engine(settings, portfolio, on_trade=trades.append)
+    engine = Engine(settings, portfolio, on_trade=trades.append, calendars=books)
 
     curve: list[tuple[int, float]] = []
     exposure: list[float] = []
@@ -355,6 +529,8 @@ def run_backtest(
     peak_equity = settings.initial_capital
     sessions = 0
     decisions = 0
+    worst_gap = 0.0
+    worst_gap_where = ""
     halted_at: int | None = None
     first_ts: int | None = None
     last_index: dict[str, int] = {}
@@ -382,6 +558,19 @@ def run_backtest(
         prices = {s: v.analysis.closes[v.index] for s, v in views.items()}
         # One session is one day: the daily loss budget resets every step.
         day_start_equity = portfolio.equity(prices)
+
+        for sym in portfolio.positions:
+            view = views.get(sym)
+            if view is None or view.index < 1:
+                continue
+            a = view.analysis
+            previous = a.closes[view.index - 1]
+            if previous <= 0:
+                continue
+            gap = a.opens[view.index] / previous - 1.0
+            if gap < worst_gap:
+                worst_gap = gap
+                worst_gap_where = f"{sym} {a.bars[view.index].session}"
 
         result = engine.step(views, ts, day_start_equity, peak_equity, decide=decide)
         if engine.halted and halted_at is None:
@@ -444,6 +633,9 @@ def run_backtest(
         sessions=sessions,
         decisions=decisions,
         decide_every=every,
+        calendars=len(books),
+        worst_gap=worst_gap,
+        worst_gap_where=worst_gap_where,
         halted_at=halted_at,
     )
 

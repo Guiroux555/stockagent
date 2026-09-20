@@ -78,6 +78,21 @@ def _parser() -> argparse.ArgumentParser:
         "the rest (e.g. --split 0.6)",
     )
     b.add_argument(
+        "--trials",
+        type=int,
+        default=None,
+        metavar="N",
+        help="settings tried on this history, for the deflated Sharpe; count "
+        "honestly, including the ones that were discarded",
+    )
+    b.add_argument(
+        "--sr-variance",
+        type=float,
+        default=0.0004,
+        metavar="V",
+        help="variance of the per-session Sharpe across those trials",
+    )
+    b.add_argument(
         "--walk-forward",
         type=int,
         default=None,
@@ -158,6 +173,17 @@ def main(argv: list[str] | None = None) -> int:
                 store, settings, start=start, decide_every=args.cadence
             )
             print(report.summary(settings))
+            if args.trials:
+                dsr = report.deflated_sharpe(args.trials, args.sr_variance)
+                print(
+                    f"  Deflated Sharpe   {dsr:12.3f}"
+                    f"   (session Sharpe {report.sharpe:.4f},"
+                    f" {args.trials} trials, SR variance {args.sr_variance:g})"
+                )
+                print(
+                    "  The probability the edge survives having tried that many"
+                    " settings on one history."
+                )
             if args.trades:
                 print()
                 _print_trades(report, settings)
